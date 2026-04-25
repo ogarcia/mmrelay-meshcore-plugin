@@ -349,15 +349,22 @@ class Plugin(BasePlugin):
                 self._mc = mc
                 self.logger.info("✅ Connected to MeshCore device (%s → %s)", conn_type.upper(), target)
 
-                if self._channel_mappings():
-                    mc.set_decrypt_channel_logs(True)
-
                 mc.subscribe(EventType.CONTACTS, self._on_contacts)
                 mc.subscribe(EventType.NEW_CONTACT, self._on_new_contact)
                 mc.subscribe(EventType.ADVERTISEMENT, self._on_advertisement)
                 mc.subscribe(EventType.RX_LOG_DATA, self._on_rx_log_data)
                 mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_msg)
                 mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_msg)
+
+                # Load channel secrets into the parser so RX_LOG_DATA can be
+                # decrypted and correlated with CHANNEL_MSG_RECV for sender resolution.
+                if self._channel_mappings():
+                    mc.set_decrypt_channel_logs(True)
+                    for mapping in self._channel_mappings():
+                        idx = mapping.get("meshcore_channel")
+                        if idx is not None:
+                            self.logger.debug("Fetching channel info for channel %d", idx)
+                            await mc.commands.device.get_channel(idx)
 
                 # Populate contacts on startup.
                 await mc.ensure_contacts()
@@ -480,6 +487,7 @@ class Plugin(BasePlugin):
 
         matrix_room = self._get_matrix_room_for_channel(channel_idx)
         if not matrix_room:
+            self.logger.debug("Channel %d message dropped (no Matrix room mapped)", channel_idx)
             return
 
         sender_name = self._resolve_channel_sender(msg)
