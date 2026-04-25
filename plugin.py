@@ -364,7 +364,7 @@ class Plugin(BasePlugin):
                         idx = mapping.get("meshcore_channel")
                         if idx is not None:
                             self.logger.debug("Fetching channel info for channel %d", idx)
-                            await mc.commands.device.get_channel(idx)
+                            await mc.commands.get_channel(idx)
 
                 # Populate contacts on startup.
                 await mc.ensure_contacts()
