@@ -6,10 +6,10 @@ Community plugin for [meshtastic-matrix-relay (mmrelay)](https://github.com/geof
 
 - **MeshCore → Matrix**: channel messages and direct messages forwarded to configured Matrix rooms.
 - **Matrix → MeshCore**: messages in mapped Matrix rooms sent to the corresponding MeshCore channel.
-- **Sender identification**: for TC_FLOOD packets, the sender's name is resolved from a local contacts database and shown in the prefix.
-- **Contacts persistence**: known MeshCore nodes are stored in mmrelay's SQLite database and used to resolve names even when the node is not currently active.
+- **Sender identification**: for direct messages, the sender's name is resolved from a local contacts database. For channel messages, MeshCore clients already include the sender name in the message text.
+- **Contacts persistence**: known MeshCore nodes are stored in mmrelay's SQLite database and used to resolve names for direct messages.
 - **Prefix formatting**: flexible format strings with named variables (`{sender}`, `{mesh}`, `{channel}`, `{display}`, `{pubkey}`).
-- **Reply passthrough**: Matrix reply fallback text (`> quote\n\nreply`) is forwarded to MeshCore as-is.
+- **Reply handling**: Matrix replies are converted to MeshCore `@[NodeName]` mentions when the original sender can be identified; the quote block is stripped to preserve the 200-byte message limit.
 
 ## Requirements
 
@@ -84,7 +84,7 @@ community-plugins:
 |----------|--------------|-------|
 | `{sender}` | DM → Matrix | `adv_name` from contacts DB; falls back to `{pubkey}` if unresolvable |
 | `{pubkey}` | DM → Matrix | First 8 hex characters of the sender's public key |
-| `{mesh}` | channel & DM → Matrix | Value of `mesh_name` in config |
+| `{mesh}` | channel → Matrix (if enabled), DM → Matrix | Value of `mesh_name` in config |
 | `{channel}` | channel → Matrix | Numeric MeshCore channel index |
 | `{display}` | Matrix → MeshCore | Matrix display name of the sender |
 
