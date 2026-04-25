@@ -43,12 +43,12 @@ community-plugins:
     mesh_name: MeshCore
 
     # ── Prefix for MeshCore channel messages relayed to Matrix ─────────────
-    # Variables: {sender} (node name, or "?" if unknown), {mesh}, {channel}
+    # Variables: {sender} (adv_name of the node, or "?" if unresolvable), {mesh}, {channel}
     channel_prefix_enabled: true
     channel_prefix_format: "[{sender}/{mesh}]: "
 
     # ── Prefix for MeshCore direct messages relayed to Matrix ──────────────
-    # Variables: {sender}, {pubkey} (short hex), {mesh}
+    # Variables: {sender} (adv_name of the node), {pubkey} (first 8 hex chars of pubkey), {mesh}
     dm_prefix_enabled: true
     dm_prefix_format: "[{sender}@{mesh}]: "
 
@@ -76,6 +76,16 @@ community-plugins:
 | `tcp` | `host`, `port` (default 5000) |
 | `serial` | `serial_port` (e.g. `/dev/ttyUSB0`) |
 | `ble` | `ble_address` (MAC address) |
+
+## Prefix format variables
+
+| Variable | Available in | Value |
+|----------|--------------|-------|
+| `{sender}` | channel & DM → Matrix | `adv_name` of the node from the contacts DB; `?` if unresolvable |
+| `{pubkey}` | DM → Matrix | First 8 hex characters of the sender's public key |
+| `{mesh}` | channel & DM → Matrix | Value of `mesh_name` in config |
+| `{channel}` | channel → Matrix | Numeric MeshCore channel index |
+| `{display}` | Matrix → MeshCore | Matrix display name of the sender |
 
 ## How sender identification works
 
