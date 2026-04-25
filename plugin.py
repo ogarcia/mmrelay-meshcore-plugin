@@ -368,8 +368,29 @@ class Plugin(BasePlugin):
 
                 # Populate contacts on startup.
                 await mc.ensure_contacts()
-                # Handle queued messages and keep fetching new ones automatically.
-                await mc.start_auto_message_fetching()
+
+                # Drain all messages already queued in the node before going live.
+                # start_auto_message_fetching() only calls get_msg() once at startup
+                # and relies on MESSAGES_WAITING to fetch the rest, which means
+                # pending messages only arrive when new traffic triggers that event.
+                # We drain the full queue here instead.
+                self.logger.info("Draining pending messages from MeshCore node…")
+                drained = 0
+                while not self._stop_event.is_set():
+                    result = await mc.commands.get_msg()
+                    if result is None or result.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
+                        break
+                    drained += 1
+                self.logger.info("Drained %d pending message(s) from node", drained)
+
+                # Subscribe to MESSAGES_WAITING to keep fetching messages as they arrive.
+                async def _on_messages_waiting(_event: Any) -> None:
+                    while not self._stop_event.is_set():
+                        res = await mc.commands.get_msg()
+                        if res is None or res.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
+                            break
+
+                mc.subscribe(EventType.MESSAGES_WAITING, _on_messages_waiting)
 
                 self.logger.info("MeshCore relay running — listening for messages")
 
