@@ -562,9 +562,12 @@ class Plugin(BasePlugin):
         # Build the text to send.
         body = full_message
         reply_to = await self._resolve_matrix_reply_target(room.room_id, event)
+        self.logger.debug("reply_to=%r  full_message=%r", reply_to, full_message)
         if reply_to:
             body = f"@[{reply_to}] {body}"
-        outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
+        prefix = self._fmt_matrix_prefix(display_name)
+        self.logger.debug("prefix=%r  body=%r", prefix, body)
+        outgoing = self._truncate(prefix + body)
         self.logger.debug("Matrix→MeshCore outgoing: %r", outgoing)
 
         mc = self._mc
