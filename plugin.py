@@ -566,8 +566,16 @@ class Plugin(BasePlugin):
         if not display_name:
             display_name = event.sender
 
-        # Build the text to send, converting Matrix reply format to MeshCore @[name] mentions.
-        body, reply_to = self._parse_matrix_reply(full_message)
+        # Build the text to send.
+        # First try to get the raw body from the event (always has the '> ...' quote block
+        # in replies regardless of mmrelay's interactions.replies setting).
+        # Fall back to full_message if event.body is not available.
+        try:
+            raw_body = event.body or full_message
+        except Exception:
+            raw_body = full_message
+
+        body, reply_to = self._parse_matrix_reply(raw_body)
         if reply_to:
             body = f"@[{reply_to}] {body}"
         outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
