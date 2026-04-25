@@ -384,7 +384,7 @@ class Plugin(BasePlugin):
                 self.logger.info("MeshCore listener cancelled")
                 break
             except Exception as exc:
-                self.logger.error("MeshCore listener error: %s", exc, exc_info=True)
+                self.logger.error("❌ MeshCore connection error: %s — retrying in %ss", exc, reconnect_delay, exc_info=True)
                 await asyncio.sleep(reconnect_delay)
             finally:
                 if mc is not None:
