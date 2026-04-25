@@ -31,10 +31,8 @@ Requires mmrelay >= 1.4 and meshcore >= 2.3.7.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import sqlite3
 import time
-from collections import OrderedDict
 from typing import Any
 
 try:
@@ -50,8 +48,6 @@ except ImportError:
 
 # Max MeshCore radio message length (bytes).  Most firmware variants cap at ~200 bytes.
 _MAX_MSG_LEN = 200
-# How many {txt_hash: transport_code} entries to cache for channel sender resolution.
-_HASH_CACHE_MAX = 200
 
 
 class Plugin(BasePlugin):
@@ -67,9 +63,6 @@ class Plugin(BasePlugin):
         self._mc: Any = None
         # Future returned by run_coroutine_threadsafe for the listener coroutine.
         self._listener_future: Any = None
-        # Cache: txt_hash (int) → transport_code (hex str) for channel sender resolution.
-        # Uses OrderedDict so we can evict oldest entries cheaply.
-        self._msg_hash_cache: OrderedDict[int, str] = OrderedDict()
         self._init_db()
 
     # ── DB helpers ────────────────────────────────────────────────────────────
@@ -208,12 +201,11 @@ class Plugin(BasePlugin):
     def _mesh_name(self) -> str:
         return self.config.get("mesh_name", "MeshCore")
 
-    def _fmt_channel_prefix(self, sender: str | None, channel_idx: int) -> str:
-        if not self.config.get("channel_prefix_enabled", True):
+    def _fmt_channel_prefix(self, channel_idx: int) -> str:
+        if not self.config.get("channel_prefix_enabled", False):
             return ""
-        fmt = self.config.get("channel_prefix_format", "[{sender}/{mesh}]: ")
+        fmt = self.config.get("channel_prefix_format", "[{mesh}]: ")
         return fmt.format(
-            sender=sender or "?",
             mesh=self._mesh_name(),
             channel=channel_idx,
         )
@@ -221,7 +213,7 @@ class Plugin(BasePlugin):
     def _fmt_dm_prefix(self, sender: str | None, pubkey_short: str) -> str:
         if not self.config.get("dm_prefix_enabled", True):
             return ""
-        fmt = self.config.get("dm_prefix_format", "[{sender}@{mesh}]: ")
+        fmt = self.config.get("dm_prefix_format", "[DM] {sender}({pubkey}): ")
         return fmt.format(
             sender=sender or pubkey_short,
             pubkey=pubkey_short,
@@ -292,8 +284,8 @@ class Plugin(BasePlugin):
         if dm_room:
             self.logger.info("  DM room    : %s  (receive-only)", dm_room)
 
-        ch_fmt = self.config.get("channel_prefix_format", "[{sender}/{mesh}]: ")
-        dm_fmt = self.config.get("dm_prefix_format", "[{sender}@{mesh}]: ")
+        ch_fmt = self.config.get("channel_prefix_format", "[{mesh}]: ")
+        dm_fmt = self.config.get("dm_prefix_format", "[DM] {sender}({pubkey}): ")
         mx_fmt = self.config.get("matrix_prefix_format", "{display}[M]: ")
         self.logger.info("  Prefix (MeshCore→Matrix channel) : %r", ch_fmt)
         self.logger.info("  Prefix (MeshCore→Matrix DM)      : %r", dm_fmt)
@@ -352,19 +344,8 @@ class Plugin(BasePlugin):
                 mc.subscribe(EventType.CONTACTS, self._on_contacts)
                 mc.subscribe(EventType.NEW_CONTACT, self._on_new_contact)
                 mc.subscribe(EventType.ADVERTISEMENT, self._on_advertisement)
-                mc.subscribe(EventType.RX_LOG_DATA, self._on_rx_log_data)
                 mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_msg)
                 mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_msg)
-
-                # Load channel secrets into the parser so RX_LOG_DATA can be
-                # decrypted and correlated with CHANNEL_MSG_RECV for sender resolution.
-                if self._channel_mappings():
-                    mc.set_decrypt_channel_logs(True)
-                    for mapping in self._channel_mappings():
-                        idx = mapping.get("meshcore_channel")
-                        if idx is not None:
-                            self.logger.debug("Fetching channel info for channel %d", idx)
-                            await mc.commands.get_channel(idx)
 
                 # Populate contacts on startup.
                 await mc.ensure_contacts()
@@ -479,25 +460,6 @@ class Plugin(BasePlugin):
                 except Exception as exc:
                     self.logger.debug("ensure_contacts after advertisement failed: %s", exc)
 
-    async def _on_rx_log_data(self, event: Any) -> None:
-        """
-        Cache the transport_code ↔ msg_hash association for channel sender resolution.
-
-        For TC_FLOOD/TC_DIRECT packets the firmware includes a 4-byte sender
-        transport code (first 4 bytes of sender's public key).  The meshcore_parser
-        computes msg_hash = SHA256(sender_timestamp_le4 + plaintext)[0:4] and stores
-        it in log_data when decrypt_channels=True.  We mirror this cache so that
-        when CHANNEL_MSG_RECV arrives we can look up the sender.
-        """
-        log_data = event.payload
-        transport_code: str | None = log_data.get("transport_code")
-        msg_hash: int | None = log_data.get("msg_hash")
-        if transport_code and msg_hash is not None:
-            self._msg_hash_cache[msg_hash] = transport_code
-            # Evict oldest entries to keep memory bounded.
-            while len(self._msg_hash_cache) > _HASH_CACHE_MAX:
-                self._msg_hash_cache.popitem(last=False)
-
     async def _on_channel_msg(self, event: Any) -> None:
         msg = event.payload
         channel_idx: int = msg.get("channel_idx", -1)
@@ -511,67 +473,11 @@ class Plugin(BasePlugin):
             self.logger.debug("Channel %d message dropped (no Matrix room mapped)", channel_idx)
             return
 
-        sender_name = self._resolve_channel_sender(msg)
-        prefix = self._fmt_channel_prefix(sender_name, channel_idx)
+        prefix = self._fmt_channel_prefix(channel_idx)
         full_msg = prefix + text
 
-        self.logger.info(
-            "MeshCore→Matrix [ch%d] %s: %s", channel_idx, sender_name or "?", text[:80]
-        )
+        self.logger.info("MeshCore→Matrix [ch%d]: %s", channel_idx, text[:80])
         await self.send_matrix_message(matrix_room, full_msg)
-
-    async def _on_contact_msg(self, event: Any) -> None:
-        msg = event.payload
-        text: str = (msg.get("text") or "").strip()
-        pubkey_prefix: str = msg.get("pubkey_prefix", "")
-
-        if not text:
-            return
-
-        dm_room = self._dm_room()
-        if not dm_room:
-            self.logger.debug(
-                "DM from %s dropped (no direct_message_room configured)", pubkey_prefix[:8]
-            )
-            return
-
-        sender_name = self._lookup_name_by_prefix(pubkey_prefix) or None
-        prefix = self._fmt_dm_prefix(sender_name, pubkey_prefix[:8])
-        full_msg = prefix + text
-
-        self.logger.info(
-            "MeshCore→Matrix [DM] %s: %s", sender_name or pubkey_prefix[:8], text[:80]
-        )
-        await self.send_matrix_message(dm_room, full_msg)
-
-    # ── Sender resolution ─────────────────────────────────────────────────────
-
-    def _resolve_channel_sender(self, msg: dict) -> str | None:
-        """
-        Attempt to resolve the display name of the sender of a channel message.
-
-        Channel messages do not carry sender identity directly.  For TC_FLOOD /
-        TC_DIRECT packets the radio log (RX_LOG_DATA) contains a 4-byte transport
-        code (first 4 bytes of sender's pubkey).  We correlate via:
-            txt_hash = SHA256(sender_timestamp_le4 + text_bytes)[0:4]  (little-endian int)
-        which matches the msg_hash computed by meshcore_parser when decrypt_channels=True.
-
-        Returns None when the sender cannot be identified (FLOOD packets or cache miss).
-        """
-        sender_timestamp: int = msg.get("sender_timestamp", 0)
-        text: str = msg.get("text") or ""
-
-        ts_bytes = sender_timestamp.to_bytes(4, "little", signed=False)
-        text_bytes = text.encode("utf-8", errors="replace")
-        txt_hash = int.from_bytes(
-            hashlib.sha256(ts_bytes + text_bytes).digest()[:4], "little", signed=False
-        )
-
-        transport_code = self._msg_hash_cache.get(txt_hash)
-        if not transport_code:
-            return None
-
-        return self._lookup_name_by_prefix(transport_code)
 
     # ── Matrix → MeshCore ─────────────────────────────────────────────────────
 

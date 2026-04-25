@@ -43,14 +43,15 @@ community-plugins:
     mesh_name: MeshCore
 
     # ── Prefix for MeshCore channel messages relayed to Matrix ─────────────
-    # Variables: {sender} (adv_name of the node, or "?" if unresolvable), {mesh}, {channel}
-    channel_prefix_enabled: true
-    channel_prefix_format: "[{sender}/{mesh}]: "
+    # MeshCore clients already prepend the sender name to the message text,
+    # so this prefix is disabled by default. Variables: {mesh}, {channel}
+    channel_prefix_enabled: false
+    channel_prefix_format: "[{mesh}]: "
 
     # ── Prefix for MeshCore direct messages relayed to Matrix ──────────────
-    # Variables: {sender} (adv_name of the node), {pubkey} (first 8 hex chars of pubkey), {mesh}
+    # Variables: {sender} (adv_name from DB, falls back to pubkey), {pubkey} (first 8 hex chars), {mesh}
     dm_prefix_enabled: true
-    dm_prefix_format: "[{sender}@{mesh}]: "
+    dm_prefix_format: "[DM] {sender}({pubkey}): "
 
     # ── Prefix prepended to Matrix messages sent to MeshCore ───────────────
     # Variables: {display} (Matrix display name)
@@ -81,7 +82,7 @@ community-plugins:
 
 | Variable | Available in | Value |
 |----------|--------------|-------|
-| `{sender}` | channel & DM → Matrix | `adv_name` of the node from the contacts DB; `?` if unresolvable |
+| `{sender}` | DM → Matrix | `adv_name` from contacts DB; falls back to `{pubkey}` if unresolvable |
 | `{pubkey}` | DM → Matrix | First 8 hex characters of the sender's public key |
 | `{mesh}` | channel & DM → Matrix | Value of `mesh_name` in config |
 | `{channel}` | channel → Matrix | Numeric MeshCore channel index |
@@ -89,11 +90,9 @@ community-plugins:
 
 ## How sender identification works
 
-MeshCore channel messages do not carry sender identity by design.  For **TC_FLOOD** and **TC_DIRECT** packets the firmware includes a 4-byte *transport code* (first 4 bytes of the sender's public key) in the raw radio log.  The plugin correlates the log entry with the delivered message via `SHA256(sender_timestamp_le4 || plaintext)[0:4]`, then looks up the sender in the contacts database.
+MeshCore channel messages do not carry sender identity by design — the MeshCore client application prepends the sender name directly to the message text (e.g. `EA1ABC: hello`).  For this reason `channel_prefix_enabled` defaults to `false`.
 
-For **FLOOD** packets (no transport code) the sender appears as `?` in the prefix.
-
-Direct messages always carry a 6-byte pubkey prefix which is looked up directly.
+Direct messages always carry a 6-byte pubkey prefix which is looked up directly in the contacts database.  If the sender is not found, the pubkey prefix is used as a fallback.
 
 ## Contacts database
 
