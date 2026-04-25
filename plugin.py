@@ -640,6 +640,8 @@ class Plugin(BasePlugin):
             self.logger.debug("Could not fetch reply target event: %s", exc)
             return None
 
+        self.logger.debug("Reply target event body: %r", original_body)
+
         # Strip any prefix brackets like "[mesh]: " before looking for "NodeName: "
         text = original_body.strip()
         if text.startswith("[") and "]: " in text:
