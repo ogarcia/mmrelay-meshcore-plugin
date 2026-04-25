@@ -479,6 +479,30 @@ class Plugin(BasePlugin):
         self.logger.info("MeshCore→Matrix [ch%d]: %s", channel_idx, text[:80])
         await self.send_matrix_message(matrix_room, full_msg)
 
+    async def _on_contact_msg(self, event: Any) -> None:
+        msg = event.payload
+        text: str = (msg.get("text") or "").strip()
+        pubkey_prefix: str = msg.get("pubkey_prefix", "")
+
+        if not text:
+            return
+
+        dm_room = self._dm_room()
+        if not dm_room:
+            self.logger.debug(
+                "DM from %s dropped (no direct_message_room configured)", pubkey_prefix[:8]
+            )
+            return
+
+        sender_name = self._lookup_name_by_prefix(pubkey_prefix) or None
+        prefix = self._fmt_dm_prefix(sender_name, pubkey_prefix[:8])
+        full_msg = prefix + text
+
+        self.logger.info(
+            "MeshCore→Matrix [DM] %s: %s", sender_name or pubkey_prefix[:8], text[:80]
+        )
+        await self.send_matrix_message(dm_room, full_msg)
+
     # ── Matrix → MeshCore ─────────────────────────────────────────────────────
 
     async def handle_meshtastic_message(
