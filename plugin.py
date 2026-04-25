@@ -566,10 +566,11 @@ class Plugin(BasePlugin):
         if not display_name:
             display_name = event.sender
 
-        # Build the text to send.  Matrix clients include a fallback quote block
-        # in the body when the user sends a threaded reply ("> sender  original\n\nreply"),
-        # so full_message already has the reply context — no extra processing needed.
-        outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + full_message)
+        # Build the text to send, converting Matrix reply format to MeshCore @[name] mentions.
+        body, reply_to = self._parse_matrix_reply(full_message)
+        if reply_to:
+            body = f"@[{reply_to}] {body}"
+        outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
 
         try:
             result = await mc.commands.send_chan_msg(channel_idx, outgoing)
@@ -592,6 +593,46 @@ class Plugin(BasePlugin):
         return True
 
     # ── Utility ───────────────────────────────────────────────────────────────
+
+    def _parse_matrix_reply(self, text: str) -> tuple[str, str | None]:
+        """
+        Parse a Matrix reply body into (reply_text, quoted_sender_name).
+
+        Matrix clients include a quote block when replying:
+            > <@user:server> NodeName: original message
+            > continued line
+
+            actual reply
+
+        We strip the quote block and try to extract the MeshCore node name from
+        the first quoted line (the pattern 'Name: message' that MeshCore clients
+        prepend).  Returns (reply_text, None) if no node name can be identified.
+        """
+        if not text.startswith("> "):
+            return text, None
+
+        parts = text.split("\n\n", 1)
+        if len(parts) < 2 or not parts[1].strip():
+            return text, None
+
+        reply_text = parts[1].strip()
+        sender_name = None
+
+        for line in parts[0].splitlines():
+            if not line.startswith("> "):
+                continue
+            content = line[2:].strip()
+            # Strip leading Matrix ID: <@user:server>
+            if content.startswith("<") and ">" in content:
+                content = content[content.index(">") + 1:].strip()
+            # Look for MeshCore 'NodeName: message' pattern
+            if ": " in content:
+                candidate = content.split(": ", 1)[0].strip()
+                if candidate and len(candidate) <= 30 and not candidate.startswith(("@", "!", "[")):
+                    sender_name = candidate
+            break
+
+        return reply_text, sender_name
 
     def _truncate(self, text: str) -> str:
         if len(text.encode("utf-8")) > _MAX_MSG_LEN:
