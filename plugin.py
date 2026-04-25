@@ -551,13 +551,6 @@ class Plugin(BasePlugin):
         except ImportError:
             pass
 
-        mc = self._mc
-        if mc is None or not mc.is_connected:
-            self.logger.warning(
-                "MeshCore not connected; dropping Matrix message from %s", room.room_id
-            )
-            return True  # Claim it so the regular mesh_relay_plugin doesn't try to send it.
-
         # Resolve sender display name (fall back to local part of Matrix ID).
         try:
             display_name = room.user_name(event.sender) or event.sender
@@ -567,9 +560,8 @@ class Plugin(BasePlugin):
             display_name = event.sender
 
         # Build the text to send.
-        # First try to get the raw body from the event (always has the '> ...' quote block
-        # in replies regardless of mmrelay's interactions.replies setting).
-        # Fall back to full_message if event.body is not available.
+        # Read event.body directly — it always has the '> ...' quote block for replies,
+        # regardless of mmrelay's interactions.replies setting (which strips it from text).
         try:
             raw_body = event.body or full_message
         except Exception:
@@ -579,6 +571,14 @@ class Plugin(BasePlugin):
         if reply_to:
             body = f"@[{reply_to}] {body}"
         outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
+        self.logger.debug("Matrix→MeshCore outgoing: %r", outgoing)
+
+        mc = self._mc
+        if mc is None or not mc.is_connected:
+            self.logger.warning(
+                "MeshCore not connected; dropping Matrix message from %s", room.room_id
+            )
+            return True
 
         try:
             result = await mc.commands.send_chan_msg(channel_idx, outgoing)
