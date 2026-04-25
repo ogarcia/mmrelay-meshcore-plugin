@@ -36,7 +36,7 @@ import time
 from typing import Any
 
 try:
-    from nio import MatrixRoom, RoomGetEventResponse, RoomMessageText
+    from nio import MatrixRoom, RoomMessageText
 except ImportError:
     pass  # resolved at runtime inside mmrelay's environment
 
@@ -560,14 +560,8 @@ class Plugin(BasePlugin):
             display_name = event.sender
 
         # Build the text to send.
-        # Read event.body directly — it always has the '> ...' quote block for replies,
-        # regardless of mmrelay's interactions.replies setting (which strips it from text).
-        try:
-            raw_body = event.body or full_message
-        except Exception:
-            raw_body = full_message
-
-        body, reply_to = self._parse_matrix_reply(raw_body)
+        body = full_message
+        reply_to = await self._resolve_matrix_reply_target(room.room_id, event)
         if reply_to:
             body = f"@[{reply_to}] {body}"
         outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
@@ -602,45 +596,63 @@ class Plugin(BasePlugin):
 
     # ── Utility ───────────────────────────────────────────────────────────────
 
-    def _parse_matrix_reply(self, text: str) -> tuple[str, str | None]:
+    async def _resolve_matrix_reply_target(
+        self, room_id: str, event: Any
+    ) -> str | None:
         """
-        Parse a Matrix reply body into (reply_text, quoted_sender_name).
+        If *event* is a Matrix reply, fetch the original event and return the
+        MeshCore node name from its body (pattern 'NodeName: message').
 
-        Matrix clients include a quote block when replying:
-            > <@user:server> NodeName: original message
-            > continued line
+        MeshCore clients prepend 'NodeName: ' to all channel messages, so the
+        original event body in Matrix will be formatted as:
+            [mesh]: NodeName: original text
+        or just:
+            NodeName: original text
 
-            actual reply
-
-        We strip the quote block and try to extract the MeshCore node name from
-        the first quoted line (the pattern 'Name: message' that MeshCore clients
-        prepend).  Returns (reply_text, None) if no node name can be identified.
+        Returns None if the event is not a reply, if the original event cannot
+        be fetched, or if no 'NodeName: ' pattern is found.
         """
-        if not text.startswith("> "):
-            return text, None
+        try:
+            relates_to = event.source.get("content", {}).get("m.relates_to", {})
+            reply_to_id = relates_to.get("m.in_reply_to", {}).get("event_id")
+        except Exception:
+            return None
 
-        parts = text.split("\n\n", 1)
-        if len(parts) < 2 or not parts[1].strip():
-            return text, None
+        if not reply_to_id:
+            return None
 
-        reply_text = parts[1].strip()
-        sender_name = None
+        try:
+            from mmrelay.matrix_utils import matrix_client  # type: ignore[import-untyped]
+        except ImportError:
+            return None
 
-        for line in parts[0].splitlines():
-            if not line.startswith("> "):
-                continue
-            content = line[2:].strip()
-            # Strip leading Matrix ID: <@user:server>
-            if content.startswith("<") and ">" in content:
-                content = content[content.index(">") + 1:].strip()
-            # Look for MeshCore 'NodeName: message' pattern
-            if ": " in content:
-                candidate = content.split(": ", 1)[0].strip()
-                if candidate and len(candidate) <= 30 and not candidate.startswith(("@", "!", "[")):
-                    sender_name = candidate
-            break
+        if matrix_client is None:
+            return None
 
-        return reply_text, sender_name
+        try:
+            from nio import RoomGetEventResponse  # type: ignore[import-untyped]
+
+            resp = await matrix_client.room_get_event(room_id, reply_to_id)
+            if not isinstance(resp, RoomGetEventResponse):
+                return None
+            original_body = getattr(resp.event, "body", "") or ""
+        except Exception as exc:
+            self.logger.debug("Could not fetch reply target event: %s", exc)
+            return None
+
+        # Strip any prefix brackets like "[mesh]: " before looking for "NodeName: "
+        text = original_body.strip()
+        if text.startswith("[") and "]: " in text:
+            text = text[text.index("]: ") + 3:]
+
+        if ": " not in text:
+            return None
+
+        candidate = text.split(": ", 1)[0].strip()
+        if candidate and len(candidate) <= 30 and not candidate.startswith(("@", "!", "[")):
+            return candidate
+
+        return None
 
     def _truncate(self, text: str) -> str:
         if len(text.encode("utf-8")) > _MAX_MSG_LEN:
