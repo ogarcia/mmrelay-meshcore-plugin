@@ -266,11 +266,6 @@ class Plugin(BasePlugin):
 
         self.logger.info("MeshCore: %s ↔ Matrix  (mesh: %s)", self._mesh_name(), self._mesh_name())
         self.logger.info("  Connection : %s  →  %s", conn_type.upper(), target)
-        self.logger.info(
-            "  Reconnect  : %s (max %s attempts)",
-            "✅ enabled" if conn_cfg.get("auto_reconnect", True) else "❌ disabled",
-            conn_cfg.get("max_reconnect_attempts", 5),
-        )
 
         if mappings:
             self.logger.info("  MeshCore Channels ↔ Matrix Rooms (%d configured):", len(mappings))
@@ -413,28 +408,30 @@ class Plugin(BasePlugin):
         from meshcore import MeshCore  # type: ignore[import-untyped]
 
         conn_type: str = conn_cfg.get("type", "tcp")
-        auto_reconnect: bool = conn_cfg.get("auto_reconnect", True)
-        max_attempts: int = conn_cfg.get("max_reconnect_attempts", 5)
 
+        # auto_reconnect and max_reconnect_attempts are intentionally not
+        # user-configurable: our own reconnection loop always retries
+        # indefinitely, so whatever the library does here is just a short
+        # burst before we take over.
         try:
             if conn_type == "tcp":
                 return await MeshCore.create_tcp(
                     host=conn_cfg.get("host", "localhost"),
                     port=conn_cfg.get("port", 5000),
-                    auto_reconnect=auto_reconnect,
-                    max_reconnect_attempts=max_attempts,
+                    auto_reconnect=True,
+                    max_reconnect_attempts=3,
                 )
             if conn_type == "serial":
                 return await MeshCore.create_serial(
                     port=conn_cfg.get("serial_port", "/dev/ttyUSB0"),
-                    auto_reconnect=auto_reconnect,
-                    max_reconnect_attempts=max_attempts,
+                    auto_reconnect=True,
+                    max_reconnect_attempts=3,
                 )
             if conn_type == "ble":
                 return await MeshCore.create_ble(
                     address=conn_cfg.get("ble_address"),
-                    auto_reconnect=auto_reconnect,
-                    max_reconnect_attempts=max_attempts,
+                    auto_reconnect=True,
+                    max_reconnect_attempts=3,
                 )
             self.logger.error("Unknown MeshCore connection type: %s", conn_type)
             return None
