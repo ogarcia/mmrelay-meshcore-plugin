@@ -235,11 +235,14 @@ class Plugin(BasePlugin):
             from mmrelay import meshtastic_utils  # type: ignore[attr-defined]
 
             loop = meshtastic_utils.event_loop
-            if loop is None or not loop.is_running():
+            if loop is None:
                 self.logger.error(
                     "asyncio event loop not available; MeshCore listener will not start"
                 )
                 return
+            self.logger.debug(
+                "event loop state: loop=%s running=%s", loop, loop.is_running()
+            )
             self._listener_future = asyncio.run_coroutine_threadsafe(
                 self._meshcore_listener(), loop
             )
