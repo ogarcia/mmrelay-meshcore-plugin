@@ -323,26 +323,75 @@ class Plugin(BasePlugin):
     async def _meshcore_listener(self) -> None:
         self.logger.debug("_meshcore_listener coroutine started")
 
-        # meshcore may still be being installed by mmrelay's plugin loader when
-        # this coroutine first runs.  Retry the import a few times before giving up.
-        EventType = None
-        for _attempt in range(6):
+        # meshcore may not be importable if mmrelay skipped requirements
+        # installation (e.g. its install cache says already done but the deps
+        # directory was wiped on container restart).  Try importing; if it
+        # fails, attempt a self-install into the first writable deps path and
+        # then retry.
+        EventType = None  # noqa: F841 — verified importable; actual use is in _run_listener_loop
+        for _attempt in range(2):
             try:
                 import importlib
                 importlib.invalidate_caches()
                 from meshcore.events import EventType  # type: ignore[import-untyped]
                 break
             except ImportError:
-                if _attempt < 5:
-                    await asyncio.sleep(5)
+                if _attempt == 0:
+                    self.logger.warning(
+                        "meshcore not importable — attempting self-install from requirements.txt"
+                    )
+                    await self._self_install_requirements()
                 else:
                     import sys
                     self.logger.error(
-                        "Cannot import meshcore — ensure it is listed in requirements.txt "
-                        "and installed in the plugin deps directory.  sys.path: %s",
+                        "Cannot import meshcore after install attempt. "
+                        "sys.path: %s",
                         sys.path,
                     )
                     return
+
+        await self._run_listener_loop()
+
+    async def _self_install_requirements(self) -> None:
+        """Install this plugin's requirements.txt via pip if meshcore is missing."""
+        import importlib
+        import subprocess
+        import sys
+
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        req_file = os.path.join(plugin_dir, "requirements.txt")
+        if not os.path.isfile(req_file):
+            self.logger.error("requirements.txt not found at %s", req_file)
+            return
+
+        # Pick the deps dir from sys.path (mmrelay adds it as /data/plugins/deps
+        # or similar), fall back to --user install.
+        deps_dir = next(
+            (p for p in sys.path if os.path.basename(p) == "deps" and os.path.isdir(p)),
+            None,
+        )
+        cmd = [sys.executable, "-m", "pip", "install", "--quiet",
+               "--disable-pip-version-check", "--no-input", "-r", req_file]
+        if deps_dir:
+            cmd += ["--target", deps_dir]
+        else:
+            cmd += ["--user"]
+
+        self.logger.info("Running: %s", " ".join(cmd))
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.check_call(cmd),
+            )
+            importlib.invalidate_caches()
+            self.logger.info("Self-install completed")
+        except Exception as exc:
+            self.logger.error("Self-install failed: %s", exc)
+
+    async def _run_listener_loop(self) -> None:
+        """Main reconnection and message relay loop (runs after meshcore is importable)."""
+        from meshcore.events import EventType  # type: ignore[import-untyped]
 
         conn_cfg: dict = self.config.get("connection") or {}
         conn_type: str = conn_cfg.get("type", "tcp")
