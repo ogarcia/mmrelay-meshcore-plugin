@@ -36,8 +36,6 @@ community-plugins:
       port: 5000                   # TCP only (default: 5000)
       #serial_port: /dev/ttyUSB0   # serial only
       #ble_address: AA:BB:CC:DD:EE:FF  # BLE only
-      auto_reconnect: true
-      max_reconnect_attempts: 5
 
     # ── Optional: friendly name shown in prefix variables {mesh} ───────────
     mesh_name: MeshCore
