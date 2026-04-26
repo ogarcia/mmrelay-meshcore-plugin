@@ -322,14 +322,27 @@ class Plugin(BasePlugin):
 
     async def _meshcore_listener(self) -> None:
         self.logger.debug("_meshcore_listener coroutine started")
-        try:
-            from meshcore.events import EventType  # type: ignore[import-untyped]
-        except ImportError:
-            import sys
-            self.logger.error(
-                "Cannot import meshcore — is it installed? sys.path: %s", sys.path
-            )
-            return
+
+        # meshcore may still be being installed by mmrelay's plugin loader when
+        # this coroutine first runs.  Retry the import a few times before giving up.
+        EventType = None
+        for _attempt in range(6):
+            try:
+                import importlib
+                importlib.invalidate_caches()
+                from meshcore.events import EventType  # type: ignore[import-untyped]
+                break
+            except ImportError:
+                if _attempt < 5:
+                    await asyncio.sleep(5)
+                else:
+                    import sys
+                    self.logger.error(
+                        "Cannot import meshcore — ensure it is listed in requirements.txt "
+                        "and installed in the plugin deps directory.  sys.path: %s",
+                        sys.path,
+                    )
+                    return
 
         conn_cfg: dict = self.config.get("connection") or {}
         conn_type: str = conn_cfg.get("type", "tcp")
