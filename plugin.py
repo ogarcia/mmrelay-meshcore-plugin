@@ -326,11 +326,16 @@ class Plugin(BasePlugin):
         else:
             target = "?"
 
+        connect_timeout = 30
+
         while not self._stop_event.is_set():
             mc = None
             try:
                 self.logger.info("Connecting to MeshCore device (%s → %s)…", conn_type.upper(), target)
-                mc = await self._connect_meshcore(conn_cfg)
+                mc = await asyncio.wait_for(
+                    self._connect_meshcore(conn_cfg),
+                    timeout=connect_timeout,
+                )
                 if mc is None:
                     self.logger.error(
                         "Could not connect to MeshCore; retrying in %ss", reconnect_delay
@@ -385,6 +390,12 @@ class Plugin(BasePlugin):
             except asyncio.CancelledError:
                 self.logger.info("MeshCore listener cancelled")
                 break
+            except asyncio.TimeoutError:
+                self.logger.error(
+                    "❌ MeshCore connection timed out after %ss — retrying in %ss",
+                    connect_timeout, reconnect_delay,
+                )
+                await asyncio.sleep(reconnect_delay)
             except Exception as exc:
                 self.logger.error("❌ MeshCore connection error: %s — retrying in %ss", exc, reconnect_delay, exc_info=True)
                 await asyncio.sleep(reconnect_delay)
