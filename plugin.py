@@ -44,9 +44,11 @@ except ImportError:
 
 try:
     from mmrelay.log_utils import get_logger
+    from mmrelay.plugin_loader import PLUGIN_STATE_FILENAME
     from mmrelay.plugins.base_plugin import BasePlugin
 except ImportError:
     from plugins.base_plugin import BasePlugin  # type: ignore[no-redef]
+    PLUGIN_STATE_FILENAME = ".mmrelay-plugin-state.json"  # fallback, matches mmrelay default
 
 # Max MeshCore radio message length (bytes).  Most firmware variants cap at ~200 bytes.
 _MAX_MSG_LEN = 200
@@ -257,11 +259,8 @@ class Plugin(BasePlugin):
                     "asyncio event loop not available; MeshCore listener will not start"
                 )
                 return
-            self.logger.debug(
-                "event loop state: loop=%s running=%s", loop, loop.is_running()
-            )
             self._listener_future = asyncio.run_coroutine_threadsafe(
-                self._meshcore_listener(), loop
+                self._run_listener_loop(), loop
             )
             self._listener_future.add_done_callback(self._on_listener_done)
             self.logger.info("MeshCore listener task scheduled on event loop")
@@ -278,7 +277,7 @@ class Plugin(BasePlugin):
         """
         try:
             plugin_dir = os.path.dirname(os.path.abspath(__file__))
-            state_file = os.path.join(plugin_dir, ".mmrelay-plugin-state.json")
+            state_file = os.path.join(plugin_dir, PLUGIN_STATE_FILENAME)
             if os.path.exists(state_file):
                 os.remove(state_file)
                 self.logger.info("Removed plugin state cache: %s", state_file)
@@ -302,7 +301,7 @@ class Plugin(BasePlugin):
         mappings = self._channel_mappings()
         dm_room = self._dm_room()
 
-        self.logger.info("MeshCore: %s ↔ Matrix  (mesh: %s)", self._mesh_name(), self._mesh_name())
+        self.logger.info("MeshCore: MeshCore ↔ Matrix  (mesh: %s)", self._mesh_name())
         self.logger.info("  Connection : %s  →  %s", conn_type.upper(), target)
 
         if mappings:
@@ -353,10 +352,6 @@ class Plugin(BasePlugin):
             pass
 
     # ── MeshCore background listener ──────────────────────────────────────────
-
-    async def _meshcore_listener(self) -> None:
-        self.logger.debug("_meshcore_listener coroutine started")
-        await self._run_listener_loop()
 
     async def _run_listener_loop(self) -> None:
         """Main reconnection and message relay loop (runs after meshcore is importable)."""
@@ -490,7 +485,7 @@ class Plugin(BasePlugin):
             self.logger.error("Unknown MeshCore connection type: %s", conn_type)
             return None
         except Exception as exc:
-            self.logger.error("MeshCore connection failed: %s", exc)
+            self.logger.debug("MeshCore connection attempt failed: %s", exc)
             return None
 
     # ── MeshCore event handlers ───────────────────────────────────────────────
