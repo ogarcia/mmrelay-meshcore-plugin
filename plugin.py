@@ -565,7 +565,6 @@ class Plugin(BasePlugin):
         if reply_to:
             body = f"@[{reply_to}] {body}"
         outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
-        self.logger.debug("Matrix→MeshCore outgoing: %r", outgoing)
 
         mc = self._mc
         if mc is None or not mc.is_connected:
