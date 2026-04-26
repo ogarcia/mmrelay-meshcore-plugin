@@ -246,6 +246,7 @@ class Plugin(BasePlugin):
             self._listener_future = asyncio.run_coroutine_threadsafe(
                 self._meshcore_listener(), loop
             )
+            self._listener_future.add_done_callback(self._on_listener_done)
             self.logger.info("MeshCore listener task scheduled on event loop")
         except Exception as exc:
             self.logger.error("Failed to start MeshCore listener: %s", exc)
@@ -306,9 +307,21 @@ class Plugin(BasePlugin):
             except Exception as exc:
                 self.logger.debug("Error scheduling MeshCore disconnect: %s", exc)
 
+    def _on_listener_done(self, future: Any) -> None:
+        try:
+            exc = future.exception()
+            if exc:
+                self.logger.error(
+                    "MeshCore listener exited with unhandled exception: %s",
+                    exc, exc_info=exc,
+                )
+        except Exception:
+            pass
+
     # ── MeshCore background listener ──────────────────────────────────────────
 
     async def _meshcore_listener(self) -> None:
+        self.logger.debug("_meshcore_listener coroutine started")
         from meshcore.events import EventType  # type: ignore[import-untyped]
 
         conn_cfg: dict = self.config.get("connection") or {}
