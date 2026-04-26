@@ -562,11 +562,10 @@ class Plugin(BasePlugin):
         # Build the text to send.
         body = full_message
         reply_to = await self._resolve_matrix_reply_target(room.room_id, event)
-        self.logger.debug("reply_to=%r", reply_to)
         if reply_to:
             body = f"@[{reply_to}] {body}"
         outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
-        self.logger.debug("Matrix→MeshCore outgoing hex: %s", outgoing.encode("utf-8").hex())
+        self.logger.debug("Matrix→MeshCore outgoing: %r", outgoing)
 
         mc = self._mc
         if mc is None or not mc.is_connected:
@@ -643,7 +642,6 @@ class Plugin(BasePlugin):
 
         # Strip any prefix brackets like "[mesh]: " before looking for "NodeName: "
         text = original_body.strip()
-        self.logger.debug("reply original_body=%r  text_after_strip=%r", original_body, text)
         if text.startswith("[") and "]: " in text:
             text = text[text.index("]: ") + 3:]
 
@@ -651,7 +649,6 @@ class Plugin(BasePlugin):
             return None
 
         candidate = text.split(": ", 1)[0].strip()
-        self.logger.debug("reply candidate=%r  len=%d", candidate, len(candidate))
         if candidate and len(candidate) <= 30 and not candidate.startswith(("@", "!", "[")):
             return candidate
 
