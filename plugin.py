@@ -322,7 +322,14 @@ class Plugin(BasePlugin):
 
     async def _meshcore_listener(self) -> None:
         self.logger.debug("_meshcore_listener coroutine started")
-        from meshcore.events import EventType  # type: ignore[import-untyped]
+        try:
+            from meshcore.events import EventType  # type: ignore[import-untyped]
+        except ImportError:
+            import sys
+            self.logger.error(
+                "Cannot import meshcore — is it installed? sys.path: %s", sys.path
+            )
+            return
 
         conn_cfg: dict = self.config.get("connection") or {}
         conn_type: str = conn_cfg.get("type", "tcp")
