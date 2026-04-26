@@ -67,6 +67,8 @@ class Plugin(BasePlugin):
         self._mc: Any = None
         # Future returned by run_coroutine_threadsafe for the listener coroutine.
         self._listener_future: Any = None
+        # Guard against registering the Matrix callback more than once.
+        self._matrix_callback_registered = False
         self._init_db()
 
     # ── DB helpers ────────────────────────────────────────────────────────────
@@ -355,6 +357,8 @@ class Plugin(BasePlugin):
 
     async def _run_listener_loop(self) -> None:
         """Main reconnection and message relay loop (runs after meshcore is importable)."""
+        await self._setup_matrix_callback()
+
         from meshcore.events import EventType  # type: ignore[import-untyped]
 
         conn_cfg: dict = self.config.get("connection") or {}
@@ -560,6 +564,115 @@ class Plugin(BasePlugin):
         )
         await self.send_matrix_message(dm_room, full_msg)
 
+    async def _setup_matrix_callback(self) -> None:
+        """Wait for Matrix client, register our room callback and join plugin rooms.
+
+        Called once at listener startup. Idempotent — skips if already registered.
+        matrix_client may be None at plugin start because mmrelay loads plugins
+        before connecting to Matrix, so we poll until it is available.
+        """
+        if self._matrix_callback_registered:
+            return
+
+        from mmrelay.matrix_utils import matrix_client as _mc_ref
+
+        # Poll until matrix_client is populated (up to 120 s).
+        mc_client = _mc_ref
+        if mc_client is None:
+            self.logger.debug("Waiting for Matrix client to become available…")
+            for _ in range(120):
+                if self._stop_event.is_set():
+                    return
+                await asyncio.sleep(1)
+                from mmrelay.matrix_utils import matrix_client as _mc_ref2
+                mc_client = _mc_ref2
+                if mc_client is not None:
+                    break
+
+        if mc_client is None:
+            self.logger.error("Matrix client never became available; Matrix→MeshCore relay disabled")
+            return
+
+        from nio import RoomMessageText  # type: ignore[import-untyped]
+        mc_client.add_event_callback(self._on_matrix_room_message, RoomMessageText)
+        self._matrix_callback_registered = True
+        self.logger.info("Matrix room message callback registered")
+
+        # Join all rooms defined in channel_mappings so the bot receives events.
+        try:
+            from mmrelay.matrix_utils import join_matrix_room  # type: ignore[attr-defined]
+        except ImportError:
+            self.logger.warning("join_matrix_room not available; rooms may not be joined")
+            return
+
+        for mapping in self._channel_mappings():
+            room_id = mapping.get("matrix_room")
+            if room_id:
+                try:
+                    await join_matrix_room(mc_client, room_id)
+                    self.logger.debug("Joined Matrix room %s", room_id)
+                except Exception as exc:
+                    self.logger.warning("Could not join Matrix room %s: %s", room_id, exc)
+
+    async def _on_matrix_room_message(self, room: Any, event: Any) -> None:
+        """Relay a Matrix message to the corresponding MeshCore channel.
+
+        Registered directly on the nio client so it fires for all rooms the bot
+        has joined, independently of mmrelay's matrix_rooms configuration.
+        """
+        try:
+            from mmrelay.matrix_utils import bot_start_time, bot_user_id  # type: ignore[attr-defined]
+            from nio import RoomMessageText  # type: ignore[import-untyped]
+        except ImportError:
+            return
+
+        if not isinstance(event, RoomMessageText):
+            return
+        if event.sender == bot_user_id:
+            return
+        if event.server_timestamp < bot_start_time:
+            return
+
+        channel_idx = self._get_meshcore_channel_for_room(room.room_id)
+        if channel_idx is None:
+            return
+
+        try:
+            display_name = room.user_name(event.sender) or event.sender
+        except Exception:
+            display_name = event.sender
+        if not display_name:
+            display_name = event.sender
+
+        body = event.body or ""
+        reply_to = await self._resolve_matrix_reply_target(room.room_id, event)
+        if reply_to:
+            body = f"@[{reply_to}] {body}"
+        outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
+
+        mc = self._mc
+        if mc is None or not mc.is_connected:
+            self.logger.warning(
+                "MeshCore not connected; dropping Matrix message from %s", room.room_id
+            )
+            return
+
+        try:
+            from meshcore.events import EventType  # type: ignore[import-untyped]
+
+            result = await mc.commands.send_chan_msg(channel_idx, outgoing)
+            if result is not None and result.type == EventType.ERROR:
+                self.logger.error("MeshCore rejected channel message: %s", result.payload)
+            else:
+                self.logger.info(
+                    "Matrix→MeshCore [ch%d] %s: %s",
+                    channel_idx,
+                    display_name,
+                    outgoing[:80],
+                )
+        except Exception as exc:
+            self.logger.error("Failed to send to MeshCore channel %d: %s", channel_idx, exc)
+
     # ── Matrix → MeshCore ─────────────────────────────────────────────────────
 
     async def handle_meshtastic_message(
@@ -578,77 +691,16 @@ class Plugin(BasePlugin):
         event: Any,
         full_message: str,
     ) -> bool:
-        """
-        Relay a Matrix room message to the corresponding MeshCore channel.
+        """Claim messages from rooms managed by this plugin.
 
-        Only handles messages from rooms explicitly mapped in channel_mappings.
-        Direct-message rooms are receive-only; Matrix messages sent there are claimed
-        (returned True) but not forwarded, so the normal mmrelay Meshtastic path does
-        not pick them up.
-        Returns True to claim the message (preventing other plugins from double-relaying),
-        False when the room is not managed by this plugin at all.
+        Returning True prevents mmrelay from relaying the message to Meshtastic.
+        The actual MeshCore relay is handled by _on_matrix_room_message, which is
+        registered directly on the nio client and fires for all joined rooms
+        (including those not listed in mmrelay's matrix_rooms config).
         """
         channel_idx = self._get_meshcore_channel_for_room(room.room_id)
         is_dm_room = room.room_id == self._dm_room()
-
-        if channel_idx is None and not is_dm_room:
-            return False
-
-        # DM room is receive-only — claim the message but do not forward it.
-        if is_dm_room:
-            return True
-
-        # For channel rooms, only relay plain text messages; claim all other
-        # event types so they don't leak to the default Meshtastic relay path.
-        try:
-            from nio import RoomMessageText  # type: ignore[import-untyped]
-
-            if not isinstance(event, RoomMessageText):
-                return True  # Claim but don't relay non-text events.
-        except ImportError:
-            pass
-
-        # Resolve sender display name (fall back to local part of Matrix ID).
-        try:
-            display_name = room.user_name(event.sender) or event.sender
-        except Exception:
-            display_name = event.sender
-        if not display_name:
-            display_name = event.sender
-
-        # Build the text to send.
-        body = full_message
-        reply_to = await self._resolve_matrix_reply_target(room.room_id, event)
-        if reply_to:
-            body = f"@[{reply_to}] {body}"
-        outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
-
-        mc = self._mc
-        if mc is None or not mc.is_connected:
-            self.logger.warning(
-                "MeshCore not connected; dropping Matrix message from %s", room.room_id
-            )
-            return True
-
-        try:
-            result = await mc.commands.send_chan_msg(channel_idx, outgoing)
-            from meshcore.events import EventType  # type: ignore[import-untyped]
-
-            if result is not None and result.type == EventType.ERROR:
-                self.logger.error(
-                    "MeshCore rejected channel message: %s", result.payload
-                )
-            else:
-                self.logger.info(
-                    "Matrix→MeshCore [ch%d] %s: %s",
-                    channel_idx,
-                    display_name,
-                    outgoing[:80],
-                )
-        except Exception as exc:
-            self.logger.error("Failed to send to MeshCore channel %d: %s", channel_idx, exc)
-
-        return True
+        return channel_idx is not None or is_dm_room
 
     # ── Utility ───────────────────────────────────────────────────────────────
 
