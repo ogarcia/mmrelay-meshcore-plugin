@@ -6,6 +6,7 @@ Community plugin for [meshtastic-matrix-relay (mmrelay)](https://github.com/geof
 
 - **MeshCore → Matrix**: channel messages and direct messages forwarded to configured Matrix rooms.
 - **Matrix → MeshCore**: messages in mapped Matrix rooms sent to the corresponding MeshCore channel.
+- **Room mapping precedence**: If a Matrix room is configured both in this plugin and in mmrelay's `matrix_rooms`, the plugin will claim incoming Matrix messages for that room and relay them only to MeshCore (not to Meshtastic). This prevents duplicate relays or message loops. Rooms configured only in the plugin work normally in both directions.
 - **Sender identification**: for direct messages, the sender's name is resolved from a local contacts database. For channel messages, MeshCore clients already include the sender name in the message text.
 - **Contacts persistence**: known MeshCore nodes are stored in mmrelay's SQLite database and used to resolve names for direct messages.
 - **Prefix formatting**: flexible format strings with named variables (`{sender}`, `{mesh}`, `{channel}`, `{display}`, `{pubkey}`).
@@ -75,6 +76,14 @@ community-plugins:
 | `tcp` | `host`, `port` (default 5000) |
 | `serial` | `serial_port` (e.g. `/dev/ttyUSB0`) |
 | `ble` | `ble_address` (MAC address) |
+
+### Matrix room configuration
+
+The plugin manages its Matrix rooms independently of mmrelay's `matrix_rooms` setting. At startup, it joins every room listed in `channel_mappings` (and `direct_message_room` if set) and registers its own Matrix event handler on the Matrix client.
+
+If a room is configured only in this plugin, it works as expected: MeshCore→Matrix and Matrix→MeshCore both function normally.
+
+If a Matrix room is configured in both this plugin and in mmrelay's `matrix_rooms`, the plugin will claim incoming Matrix messages for that room and relay them only to MeshCore (not to Meshtastic). This prevents duplicate relays or message loops. The behavior is the same regardless of whether `meshtastic_channel` is set for that room in `matrix_rooms`.
 
 ## Prefix format variables
 
