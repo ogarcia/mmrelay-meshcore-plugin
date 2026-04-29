@@ -57,12 +57,21 @@ community-plugins:
     matrix_prefix_enabled: true
     matrix_prefix_format: "{display}[M]: "
 
-    # ── Channel mappings: MeshCore channel index ↔ Matrix room ─────────────
+    # ── Channel mappings: MeshCore ↔ Matrix ──────────────────────────────
+    # Only named channels with PSK are supported.
+    # Provide the channel name and its PSK key (hex string, 32 chars).
+    # The plugin auto-discovers channels from CHANNEL_INFO events sent by the node.
+    # If CHANNEL_INFO is not available, the channel name is inferred from the
+    # message content (MeshCore clients prepend "ChannelName: " to messages).
     channel_mappings:
+      # Default "Public" channel (key is SHA256("Public")[0:16])
       - matrix_room: "!someroomid:example.matrix.org"
-        meshcore_channel: 0
+        meshcore_channel_name: "Public"
+        meshcore_channel_key: "8B3387E9C5CDEA6AC9E5EDBAA115CD72"
+      # Named channel with custom key
       - matrix_room: "!otherroomid:example.matrix.org"
-        meshcore_channel: 1
+        meshcore_channel_name: "GALICIA"
+        meshcore_channel_key: "F32E1D081E0FE4C4849BE4324BE2CBD9"
 
     # ── Optional: Matrix room for incoming MeshCore direct messages ─────────
     # This room is receive-only; messages sent in it are not forwarded.
@@ -92,7 +101,7 @@ If a Matrix room is configured in both this plugin and in mmrelay's `matrix_room
 | `{sender}` | DM → Matrix | `adv_name` from contacts DB; falls back to `{pubkey}` if unresolvable |
 | `{pubkey}` | DM → Matrix | First 8 hex characters of the sender's public key |
 | `{mesh}` | channel → Matrix (if enabled), DM → Matrix | Value of `mesh_name` in config |
-| `{channel}` | channel → Matrix | Numeric MeshCore channel index |
+| `{channel}` | channel → Matrix | MeshCore channel name (the `meshcore_channel_name` from config) |
 | `{display}` | Matrix → MeshCore | Matrix display name of the sender |
 
 ## How sender identification works

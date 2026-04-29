@@ -18,8 +18,9 @@
 """
 mmrelay-meshcore-plugin
 
-Community plugin for meshtastic-matrix-relay (mmrelay) that bridges Matrix rooms
-with MeshCore radio network channels, analogous to how mmrelay bridges Meshtastic.
+Community plugin for meshtastic-matrix-relay (mmrelay) that
+bridges Matrix rooms with MeshCore radio network channels, analogous
+to how mmrelay bridges Meshtastic.
 
 Relay directions:
   - MeshCore → Matrix: channel messages and direct messages forwarded to Matrix rooms.
@@ -48,10 +49,51 @@ try:
     from mmrelay.plugins.base_plugin import BasePlugin
 except ImportError:
     from plugins.base_plugin import BasePlugin  # type: ignore[no-redef]
-    PLUGIN_STATE_FILENAME = ".mmrelay-plugin-state.json"  # fallback, matches mmrelay default
+    PLUGIN_STATE_FILENAME = ".mmrelay-plugin-state.json"
+    # fallback, matches mmrelay default
 
-# Max MeshCore radio message length (bytes).  Most firmware variants cap at ~200 bytes.
+# Max MeshCore radio message length (bytes).
+# Most firmware variants cap at ~200 bytes.
 _MAX_MSG_LEN = 200
+
+
+def compute_channel_id(name: str, key: str) -> str:
+    """Compute MeshCore 64-hex channel ID from name and PSK key.
+
+    For named channels with PSK, MeshCore requires a hashed channel ID
+    (64 hex chars, prefixed with 'ff') instead of a numeric index.
+    """
+    import hashlib
+
+    combined = f"{name}:{key}"
+    name_hash = hashlib.sha256(combined.encode()).hexdigest()
+    return "ff" + name_hash[2:]
+
+
+def parse_channel_mapping(mapping: dict) -> dict | None:
+    """Parse a channel mapping entry from config.
+
+    Only supports named channels with PSK:
+        matrix_room: "!roomid..."
+        meshcore_channel_name: "GALICIA"
+        meshcore_channel_key: "ABC123..."
+
+    Returns a dict with: matrix_room, channel_name, channel_key, channel_id.
+    Returns None if config is invalid.
+    """
+    room = mapping.get("matrix_room")
+    name = mapping.get("meshcore_channel_name")
+    key = mapping.get("meshcore_channel_key")
+
+    if not room or not name or not key:
+        return None
+
+    return {
+        "matrix_room": room,
+        "channel_name": name,
+        "channel_key": key,
+        "channel_id": compute_channel_id(name, key),
+    }
 
 
 class Plugin(BasePlugin):
@@ -69,6 +111,12 @@ class Plugin(BasePlugin):
         self._listener_future: Any = None
         # Guard against registering the Matrix callback more than once.
         self._matrix_callback_registered = False
+        # Discovered channels: name -> {channel_id, key, idx (if known)}
+        self._channels_by_name: dict[str, dict] = {}
+        # Index lookup: channel_idx -> {channel_name, channel_id, ...}
+        self._channels_by_idx: dict[int, dict] = {}
+        # Reverse: channel_id (64 hex) -> name
+        self._channel_id_to_name: dict[str, str] = {}
         self._init_db()
 
     # ── DB helpers ────────────────────────────────────────────────────────────
@@ -187,18 +235,32 @@ class Plugin(BasePlugin):
     # ── Config helpers ────────────────────────────────────────────────────────
 
     def _channel_mappings(self) -> list[dict]:
-        return self.config.get("channel_mappings") or []
+        """Return validated channel mappings (only named channels with PSK)."""
+        raw = self.config.get("channel_mappings") or []
+        result = []
+        for m in raw:
+            parsed = parse_channel_mapping(m)
+            if parsed:
+                result.append(parsed)
+            else:
+                self.logger.warning("Invalid channel mapping ignored: %s", m)
+        return result
 
-    def _get_matrix_room_for_channel(self, channel_idx: int) -> str | None:
-        for m in self._channel_mappings():
-            if m.get("meshcore_channel") == channel_idx:
-                return m.get("matrix_room")
+    def _get_matrix_room_for_channel_name(self, channel_name: str) -> str | None:
+        """Find Matrix room for a channel name."""
+        for ch in self._channel_mappings():
+            if ch["channel_name"] == channel_name:
+                return ch["matrix_room"]
         return None
 
-    def _get_meshcore_channel_for_room(self, room_id: str) -> int | None:
-        for m in self._channel_mappings():
-            if m.get("matrix_room") == room_id:
-                return m.get("meshcore_channel")
+    def _get_channel_info_for_room(self, room_id: str) -> dict | None:
+        """Get channel info dict for a Matrix room.
+
+        Returns dict with 'channel_name', 'channel_id', 'channel_key', 'matrix_room'.
+        """
+        for ch in self._channel_mappings():
+            if ch["matrix_room"] == room_id:
+                return ch
         return None
 
     def _dm_room(self) -> str | None:
@@ -207,13 +269,25 @@ class Plugin(BasePlugin):
     def _mesh_name(self) -> str:
         return self.config.get("mesh_name", "MeshCore")
 
-    def _fmt_channel_prefix(self, channel_idx: int) -> str:
+    def _fmt_channel_prefix(self, channel_info: dict) -> str:
+        """Format prefix for channel messages.
+
+        Args:
+            channel_info: dict with 'type' ('numeric'/'named'), 'channel_idx' (int),
+                         'channel_name' (str, for named channels)
+        """
         if not self.config.get("channel_prefix_enabled", False):
             return ""
         fmt = self.config.get("channel_prefix_format", "[{mesh}]: ")
+
+        if channel_info.get("type") == "named":
+            channel_display = channel_info.get("channel_name", "?")
+        else:
+            channel_display = channel_info.get("channel_idx", "?")
+
         return fmt.format(
             mesh=self._mesh_name(),
-            channel=channel_idx,
+            channel=channel_display,
         )
 
     def _fmt_dm_prefix(self, sender: str | None, pubkey_short: str) -> str:
@@ -308,10 +382,12 @@ class Plugin(BasePlugin):
 
         if mappings:
             self.logger.info("  MeshCore Channels ↔ Matrix Rooms (%d configured):", len(mappings))
-            for m in mappings:
-                ch = m.get("meshcore_channel", "?")
-                room = m.get("matrix_room", "?")
-                self.logger.info("    Channel %s  →  %s", ch, room)
+            for ch in mappings:
+                room = ch.get("matrix_room", "?")
+                name = ch.get("channel_name", "?")
+                key = ch.get("channel_key", "")
+                key_display = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "?"
+                self.logger.info("    %s (key: %s)  →  %s", name, key_display, room)
         else:
             self.logger.warning("  ⚠️  No channel_mappings configured — relay inactive")
 
@@ -399,6 +475,12 @@ class Plugin(BasePlugin):
                 mc.subscribe(EventType.ADVERTISEMENT, self._on_advertisement)
                 mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_msg)
                 mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_msg)
+                mc.subscribe(EventType.CHANNEL_INFO, self._on_channel_info)
+
+                # Clear and reload channels on reconnect
+                self._channels_by_name.clear()
+                self._channel_id_to_name.clear()
+                self._channels_by_idx.clear()
 
                 # Populate contacts on startup.
                 await mc.ensure_contacts()
@@ -521,6 +603,35 @@ class Plugin(BasePlugin):
                 except Exception as exc:
                     self.logger.debug("ensure_contacts after advertisement failed: %s", exc)
 
+    async def _on_channel_info(self, event: Any) -> None:
+        """Handle CHANNEL_INFO events to auto-discover channel names and keys."""
+        payload = event.payload
+        name = payload.get("channel_name", "")
+        secret = payload.get("channel_secret", b"")
+        idx = payload.get("channel_idx")
+
+        if not name or not secret:
+            return
+
+        key_hex = secret.hex()
+        channel_id = compute_channel_id(name, key_hex)
+
+        # Store by name
+        self._channels_by_name[name] = {
+            "channel_name": name,
+            "channel_key": key_hex,
+            "channel_id": channel_id,
+            "channel_idx": idx,
+        }
+        # Store by index for quick lookup
+        if idx is not None:
+            self._channels_by_idx[idx] = self._channels_by_name[name]
+        # Store reverse mapping
+        self._channel_id_to_name[channel_id] = name
+
+        self.logger.info("Discovered MeshCore channel: %s (idx=%s, id=%s...)",
+                        name, idx, channel_id[:8])
+
     async def _on_channel_msg(self, event: Any) -> None:
         msg = event.payload
         channel_idx: int = msg.get("channel_idx", -1)
@@ -529,15 +640,37 @@ class Plugin(BasePlugin):
         if not text:
             return
 
-        matrix_room = self._get_matrix_room_for_channel(channel_idx)
-        if not matrix_room:
-            self.logger.debug("Channel %d message dropped (no Matrix room mapped)", channel_idx)
+        # Try to resolve channel name from auto-discovered channels
+        channel_name = None
+        if channel_idx in self._channels_by_idx:
+            channel_name = self._channels_by_idx[channel_idx].get("channel_name")
+
+        # If not found by idx, try to infer from message content
+        # MeshCore clients prepend "ChannelName: message" to channel messages
+        if not channel_name and ": " in text:
+            potential_name = text.split(": ", 1)[0].strip()
+            # Check if this name is in our config
+            if self._get_matrix_room_for_channel_name(potential_name):
+                channel_name = potential_name
+                self.logger.debug("Inferred channel name from message: %s", channel_name)
+
+        if not channel_name:
+            self.logger.warning(
+                "Channel idx=%d message dropped (unknown channel, no CHANNEL_INFO received)",
+                channel_idx,
+            )
             return
 
-        prefix = self._fmt_channel_prefix(channel_idx)
+        matrix_room = self._get_matrix_room_for_channel_name(channel_name)
+        if not matrix_room:
+            self.logger.debug("Channel %s message dropped (no Matrix room mapped)", channel_name)
+            return
+
+        channel_info = {"type": "named", "channel_name": channel_name}
+        prefix = self._fmt_channel_prefix(channel_info)
         full_msg = prefix + text
 
-        self.logger.info("MeshCore→Matrix [ch%d]: %s", channel_idx, text[:80])
+        self.logger.info("MeshCore→Matrix [%s]: %s", channel_name, text[:80])
         await self.send_matrix_message(matrix_room, full_msg)
 
     async def _on_contact_msg(self, event: Any) -> None:
@@ -633,8 +766,8 @@ class Plugin(BasePlugin):
         if event.server_timestamp < bot_start_time:
             return
 
-        channel_idx = self._get_meshcore_channel_for_room(room.room_id)
-        if channel_idx is None:
+        channel_info = self._get_channel_info_for_room(room.room_id)
+        if channel_info is None:
             return
 
         try:
@@ -660,18 +793,27 @@ class Plugin(BasePlugin):
         try:
             from meshcore.events import EventType  # type: ignore[import-untyped]
 
-            result = await mc.commands.send_chan_msg(channel_idx, outgoing)
+            # Only named channels with PSK supported
+            channel_id = channel_info["channel_id"]
+            channel_name = channel_info.get("channel_name", "?")
+            result = await mc.commands.send_msg(channel_id, outgoing)
+            log_ch = channel_name
+
             if result is not None and result.type == EventType.ERROR:
                 self.logger.error("MeshCore rejected channel message: %s", result.payload)
             else:
                 self.logger.info(
-                    "Matrix→MeshCore [ch%d] %s: %s",
-                    channel_idx,
+                    "Matrix→MeshCore [%s] %s: %s",
+                    log_ch,
                     display_name,
                     outgoing[:80],
                 )
         except Exception as exc:
-            self.logger.error("Failed to send to MeshCore channel %d: %s", channel_idx, exc)
+            self.logger.error(
+                "Failed to send to MeshCore channel %s: %s",
+                channel_info.get("channel_name", "?"),
+                exc,
+            )
 
     # ── Matrix → MeshCore ─────────────────────────────────────────────────────
 
@@ -698,9 +840,9 @@ class Plugin(BasePlugin):
         registered directly on the nio client and fires for all joined rooms
         (including those not listed in mmrelay's matrix_rooms config).
         """
-        channel_idx = self._get_meshcore_channel_for_room(room.room_id)
+        channel_info = self._get_channel_info_for_room(room.room_id)
         is_dm_room = room.room_id == self._dm_room()
-        return channel_idx is not None or is_dm_room
+        return channel_info is not None or is_dm_room
 
     # ── Utility ───────────────────────────────────────────────────────────────
 
