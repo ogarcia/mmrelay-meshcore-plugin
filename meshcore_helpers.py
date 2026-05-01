@@ -56,13 +56,24 @@ def decrypt_group_text(payload: bytes, channel_key: bytes):
     return DecryptedGroupText(timestamp, flags, sender, content, channel_hash)
 
 def compute_channel_id(name: str, key: str) -> str:
-    """Compute MeshCore 64-hex channel ID from name and PSK key.
-    For named channels with PSK, MeshCore requires a hashed channel ID
-    (64 hex chars, prefixed with 'ff') instead of a numeric index.
     """
-    combined = f"{name}:{key}"
-    name_hash = hashlib.sha256(combined.encode()).hexdigest()
-    return "ff" + name_hash[2:]
+    Compute MeshCore channel ID compatible with Remote Terminal and standard MeshCore:
+    - If 'key' is provided (not empty) and name does NOT start with '#',
+      returns that key (as uppercase hex, exactly 32 hex characters) as channel_id.
+    - If channel name starts with '#', or no key is provided, computes SHA-256(name.encode("utf-8")),
+      takes first 16 bytes, and returns as uppercase hex (32 chars).
+    """
+    key = (key or '').strip()
+    name = (name or '').strip()
+    # Standard: If non-hashtag channel and key present, use key as channel_id
+    if key and not name.startswith('#'):
+        key_hex = key.upper()
+        if len(key_hex) == 32 and all(c in "0123456789ABCDEF" for c in key_hex):
+            return key_hex
+        raise ValueError(f"Channel key must be 32 hex characters. Got: {key!r}")
+    # Otherwise (hashtag/public or missing key), derive from name
+    hash16 = hashlib.sha256(name.encode('utf-8')).digest()[:16]
+    return hash16.hex().upper()
 
 # --- MeshCore send helpers ---
 

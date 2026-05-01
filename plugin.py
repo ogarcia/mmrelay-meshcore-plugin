@@ -87,13 +87,13 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
     name = mapping.get("meshcore_channel_name")
     key = mapping.get("meshcore_channel_key")
 
-    if not room or not name or not key:
+    if not room or not name:
         return None
 
     return {
         "matrix_room": room,
         "channel_name": name,
-        "channel_key": key,
+        "channel_key": key,  # May be None or empty for hashtag/public channels
         "channel_id": compute_channel_id(name, key),
     }
 

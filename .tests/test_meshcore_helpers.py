@@ -1,5 +1,5 @@
 import pytest
-from meshcore_helpers import sanitize_text, _MAX_MSG_LEN
+from meshcore_helpers import sanitize_text, _MAX_MSG_LEN, compute_channel_id
 
 def test_returns_str_never_none():
     assert isinstance(sanitize_text(None), str)
@@ -8,6 +8,33 @@ def test_returns_str_never_none():
     assert sanitize_text("") == ""
     assert isinstance(sanitize_text("hello"), str)
 
+def test_channel_id_with_psk():
+    # Caso compatible con Remote Terminal: name normal, key hex válida
+    name = "GALICIA"
+    key = "F32E1D081E0FE4C4849BE4324BE2CBD9"
+    assert compute_channel_id(name, key) == key.upper()
+    # Acepta key en minúsculas o con espacios
+    assert compute_channel_id(name, "  f32e1d081e0fe4c4849be4324be2cbd9  ") == key.upper()
+
+def test_channel_id_only_name():
+    # Canal hashtag o sin key: debe hacer SHA256
+    name = "GALICIA"
+    ref = compute_channel_id(name, "")
+    # Debe dar 32 hex chars (16 bytes)
+    assert len(ref) == 32
+    name2 = "#GALICIA"
+    ref2 = compute_channel_id(name2, None)
+    assert len(ref2) == 32
+    # Si cambias el nombre, cambia el hash
+    assert compute_channel_id("GALICIA1", None) != ref
+
+def test_channel_id_invalid_key():
+    with pytest.raises(ValueError):
+        compute_channel_id("X", "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")  # No hex
+    with pytest.raises(ValueError):
+        compute_channel_id("X", "1234")  # Too short
+
+# Resto de tests de sanitize_text abajo
 
 def test_normalization_and_controls():
     # Normalization

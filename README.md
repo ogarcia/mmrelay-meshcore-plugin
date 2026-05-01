@@ -64,10 +64,9 @@ community-plugins:
     # If CHANNEL_INFO is not available, the channel name is inferred from the
     # message content (MeshCore clients prepend "ChannelName: " to messages).
     channel_mappings:
-      # Default "Public" channel (key is SHA256("Public")[0:16])
+      # Default public hashtag channel (channel_id is SHA256("#Public")[0:16], key not required)
       - matrix_room: "!someroomid:example.matrix.org"
-        meshcore_channel_name: "Public"
-        meshcore_channel_key: "8B3387E9C5CDEA6AC9E5EDBAA115CD72"
+        meshcore_channel_name: "#Public"
       # Named channel with custom key
       - matrix_room: "!otherroomid:example.matrix.org"
         meshcore_channel_name: "GALICIA"
