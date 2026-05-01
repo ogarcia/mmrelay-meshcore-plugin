@@ -985,12 +985,16 @@ class Plugin(BasePlugin):
         from meshcore_helpers import send_channel_message_with_timestamp
 
         channel_name = channel_info.get("channel_name", "?")
+        # Normalize public channel name (remove leading # for lookup/id)
+        normalized_name = channel_name[1:] if channel_name.startswith("#") else channel_name
         # 1. Use explicit index if present
         channel_index = channel_info.get("channel_index")
         if channel_index is None:
             # Otherwise, try to autodiscover
-            # Look up by channel_id first (most robust), otherwise by name+key
-            channel_id = channel_info.get("channel_id")
+            # Look up by channel_id, recomputed with normalized name
+            from meshcore_helpers import compute_channel_id
+            key = channel_info.get("channel_key", "")
+            channel_id = compute_channel_id(normalized_name, key)
             found = None
             for idx, chan in self._channels_by_idx.items():
                 if chan.get("channel_id") == channel_id:
@@ -1001,9 +1005,10 @@ class Plugin(BasePlugin):
             else:
                 # Fallback: search by name and key
                 for idx, chan in self._channels_by_idx.items():
-                    if chan.get("channel_name") == channel_name and chan.get("channel_key") == channel_info.get("channel_key"):
-                        channel_index = idx
-                        break
+                    if chan.get("channel_name") == channel_name or chan.get("channel_name") == normalized_name:
+                        if chan.get("channel_key") == key:
+                            channel_index = idx
+                            break
         if channel_index is None:
             self.logger.error(
                 "Could not find MeshCore slot index for channel %s (id=%s). Message not sent.",
