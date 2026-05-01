@@ -30,9 +30,15 @@ async def test_send_channel_message_with_timestamp(monkeypatch):
     mc = MagicMock()
     mc.commands.send_msg = AsyncMock(return_value=None)
 
+    # Simulate discovered channel with slot 5
     channel_info = {
         "channel_id": "CHAN1234",
         "channel_name": "TestChannel",
+    }
+    plugin._channels_by_idx[5] = {
+        "channel_id": "CHAN1234",
+        "channel_name": "TestChannel",
+        "channel_key": None
     }
     message = "Hola mundo"
     display_name = "Tester"
@@ -45,7 +51,7 @@ async def test_send_channel_message_with_timestamp(monkeypatch):
     # Should call send_msg once with correct channel and timestamped message
     assert mc.commands.send_msg.call_count == 1
     sent_args = mc.commands.send_msg.call_args[0]
-    assert sent_args[0] == channel_info["channel_id"]
+    assert sent_args[0] == 5      # slot used in this test setup
     # Message starts with [timestamp_hex]
     m = re.match(r"\[(\w+)\] (.+)", sent_args[1])
     assert m, f"Message {sent_args[1]!r} does not start with [timestamp] prefix"
@@ -62,7 +68,9 @@ async def test_send_channel_message_handles_errors(caplog):
     mc = MagicMock()
     # Simulate error in send_msg
     mc.commands.send_msg = AsyncMock(side_effect=Exception("fail send"))
+    # Simulate discovered channel with slot 7
     channel_info = {"channel_id": "X1", "channel_name": "Err"}
+    plugin._channels_by_idx[7] = {"channel_id": "X1", "channel_name": "Err", "channel_key": None}
     msg = "Error msg"
     # Should not throw, should log the error
     await plugin._send_channel_message_with_overrides(mc, channel_info, msg, "User")

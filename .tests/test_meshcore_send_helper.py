@@ -10,11 +10,11 @@ import re
 async def test_send_channel_message_with_timestamp(monkeypatch):
     mc = MagicMock()
     mc.commands.send_msg = AsyncMock(return_value="ok")
-    channel_id = "CHANID"
+    channel_index = 3
     message = "Hello MeshCore"
     fixed_time = 1700000000.123
     monkeypatch.setattr(time, "time", lambda: fixed_time)
-    result = await send_channel_message_with_timestamp(mc, channel_id, message)
+    result = await send_channel_message_with_timestamp(mc, channel_index, message)
     mc.commands.send_msg.assert_called_once()
     args, kwargs = mc.commands.send_msg.call_args
     sent_msg = args[1]
@@ -22,7 +22,7 @@ async def test_send_channel_message_with_timestamp(monkeypatch):
     ts_pref = f"[{format(int(fixed_time*1000), 'x')}] "
     assert sent_msg.startswith(ts_pref)
     assert sent_msg.endswith(message)
-    assert args[0] == channel_id
+    assert args[0] == channel_index
     assert result == "ok"
 
 @pytest.mark.asyncio
@@ -35,10 +35,10 @@ async def test_send_channel_message_with_timestamp(monkeypatch):
 async def test_send_channel_message_with_problematic_inputs(problem_text, monkeypatch):
     mc = MagicMock()
     mc.commands.send_msg = AsyncMock(return_value="ok")
-    channel_id = "CHANID2"
+    channel_index = 4
     fixed_time = 1701234567.89
     monkeypatch.setattr(time, "time", lambda: fixed_time)
-    result = await send_channel_message_with_timestamp(mc, channel_id, problem_text)
+    result = await send_channel_message_with_timestamp(mc, channel_index, problem_text)
     mc.commands.send_msg.assert_called_once()
     args, kwargs = mc.commands.send_msg.call_args
     sent_msg = args[1]
@@ -46,13 +46,13 @@ async def test_send_channel_message_with_problematic_inputs(problem_text, monkey
     assert isinstance(sent_msg, str)
     # El mensaje nunca debe contener controles ASCII (salvo saltos de línea, si los hubiera)
     assert not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", sent_msg)
-    assert args[0] == channel_id
+    assert args[0] == channel_index
     assert result == "ok"
 
 @pytest.mark.asyncio
 async def test_send_channel_message_with_send_msg_error(monkeypatch):
     mc = MagicMock()
     mc.commands.send_msg = AsyncMock(side_effect=Exception("boom!"))
-    channel_id = "CHANID3"
+    channel_index = 8
     with pytest.raises(Exception):
-        await send_channel_message_with_timestamp(mc, channel_id, "Testing error")
+        await send_channel_message_with_timestamp(mc, channel_index, "Testing error")

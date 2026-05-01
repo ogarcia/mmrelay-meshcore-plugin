@@ -57,20 +57,28 @@ community-plugins:
     matrix_prefix_enabled: true
     matrix_prefix_format: "{display}[M]: "
 
-    # ── Channel mappings: MeshCore ↔ Matrix ──────────────────────────────
-    # Only named channels with PSK are supported.
-    # Provide the channel name and its PSK key (hex string, 32 chars).
-    # The plugin auto-discovers channels from CHANNEL_INFO events sent by the node.
-    # If CHANNEL_INFO is not available, the channel name is inferred from the
-    # message content (MeshCore clients prepend "ChannelName: " to messages).
-    channel_mappings:
-      # Default public hashtag channel (channel_id is SHA256("#Public")[0:16], key not required)
-      - matrix_room: "!someroomid:example.matrix.org"
-        meshcore_channel_name: "#Public"
-      # Named channel with custom key
-      - matrix_room: "!otherroomid:example.matrix.org"
-        meshcore_channel_name: "GALICIA"
-        meshcore_channel_key: "F32E1D081E0FE4C4849BE4324BE2CBD9"
+     # ── Channel mappings: MeshCore ↔ Matrix ──────────────────────────────
+     # Only named channels with PSK are supported.
+     # Provide the channel name and its PSK key (hex string, 32 chars).
+     #
+     # NEW: You may (and should, for exact matching) provide the slot index of
+     # the channel on the MeshCore node using the optional meshcore_channel_index field.
+     # This is the real channel slot used internally by MeshCore for sending.
+     #
+     # If meshcore_channel_index is omitted, the plugin will autodetect the correct slot
+     # by matching name/key with active slots on the MeshCore node at runtime.
+     # DO NOT assume the slot matches your config order; check with your node UI or status.
+     # Messages will ONLY be sent if an exact match is found. See troubleshooting.
+     channel_mappings:
+       # Default public hashtag channel (channel_id is SHA256("#Public")[0:16], key not required)
+       - matrix_room: "!someroomid:example.matrix.org"
+         meshcore_channel_name: "#Public"
+         # meshcore_channel_index: 0  # Optional: slot index for hashtag/public channel
+       # Named channel with custom key (explicit slot index)
+       - matrix_room: "!otherroomid:example.matrix.org"
+         meshcore_channel_name: "GALICIA"
+         meshcore_channel_key: "F32E1D081E0FE4C4849BE4324BE2CBD9"
+         meshcore_channel_index: 5   # <=== Slot index assigned on your MeshCore node
 
     # ── Optional: Matrix room for incoming MeshCore direct messages ─────────
     # This room is receive-only; messages sent in it are not forwarded.
@@ -103,7 +111,14 @@ If a Matrix room is configured in both this plugin and in mmrelay's `matrix_room
 | `{channel}` | channel → Matrix | MeshCore channel name (the `meshcore_channel_name` from config) |
 | `{display}` | Matrix → MeshCore | Matrix display name of the sender |
 
-## How sender identification works
+## How it works: Channel slot index (slot/idx)
+
+MeshCore requires all messages to target the correct slot (channel index) as configured on the node itself.
+
+- You MUST specify the correct slot/slot index in `meshcore_channel_index` for fully deterministic sending, especially if you change channel order or add channels on the node.
+- If omitted, the plugin will try to autodetect the slot/index by matching name/key to active slots. Messages are only sent if the slot is found, otherwise a clear error is logged and the message is NOT sent.
+- This design avoids the classic ERR_CODE_NOT_FOUND problem when `channel_id`/hash does not match the internal slot index on the node.
+- Double check your MeshCore node UI or remote terminal to find the slot index/position, and match it in your mapping.
 
 MeshCore channel messages do not carry sender identity by design — the MeshCore client application prepends the sender name directly to the message text (e.g. `EA1ABC: hello`).  For this reason `channel_prefix_enabled` defaults to `false`.
 

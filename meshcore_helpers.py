@@ -77,16 +77,17 @@ def compute_channel_id(name: str, key: str) -> str:
 
 # --- MeshCore send helpers ---
 
-async def send_channel_message_with_timestamp(mc, channel_id, message):
+async def send_channel_message_with_timestamp(mc, channel_index, message):
     """
-    Send a message to MeshCore, adding a unique timestamp prefix.
-    Returns the result of mc.commands.send_msg.
+    Send a message to MeshCore channel **index** (slot), adding a unique timestamp prefix.
+    channel_index: Integer index (slot) of the MeshCore channel (not channel_id/hash/key).
+    Returns the result of mc.commands.send_msg(channel_index, message).
     Pure helper, does not depend on plugin or logging.
     """
     timestamp_ms = int(time.time() * 1000)
     prefix = f"[{timestamp_ms:x}] "
     outgoing_with_ts = prefix + message
-    return await mc.commands.send_msg(channel_id, outgoing_with_ts)
+    return await mc.commands.send_msg(channel_index, outgoing_with_ts)
 
 _timestamp_regex = re.compile(r"^\[([0-9a-f]+)\] (.*)")
 def has_timestamp_prefix(text):

@@ -75,27 +75,36 @@ from meshcore_helpers import compute_channel_id
 def parse_channel_mapping(mapping: dict) -> dict | None:
     """Parse a channel mapping entry from config.
 
-    Only supports named channels with PSK:
+    Supports:
         matrix_room: "!roomid..."
         meshcore_channel_name: "GALICIA"
         meshcore_channel_key: "ABC123..."
+        meshcore_channel_index: 1   # (OPTIONAL)
 
-    Returns a dict with: matrix_room, channel_name, channel_key, channel_id.
+    Returns a dict with: matrix_room, channel_name, channel_key, channel_id, channel_index (if any).
     Returns None if config is invalid.
     """
     room = mapping.get("matrix_room")
     name = mapping.get("meshcore_channel_name")
     key = mapping.get("meshcore_channel_key")
+    index = mapping.get("meshcore_channel_index")
 
     if not room or not name:
         return None
 
-    return {
+    result = {
         "matrix_room": room,
         "channel_name": name,
         "channel_key": key,  # May be None or empty for hashtag/public channels
         "channel_id": compute_channel_id(name, key),
     }
+    if index is not None:
+        try:
+            result["channel_index"] = int(index)
+        except Exception:
+            pass  # Ignore, log/warn can be added if needed
+    return result
+
 
 
 class Plugin(BasePlugin):
@@ -876,50 +885,69 @@ class Plugin(BasePlugin):
 
     async def _send_channel_message_with_overrides(self, mc, channel_info, outgoing, display_name):
         """
-        Robust send to MeshCore channel, allowing slot/channel overrides in future.
-        Steps:
-        1. (Placeholder) Set channel overrides or flood scope/hashmode if needed. (No-op in default)
-        2. Send message atomically.
-        3. Restore overrides/state if applicable.
+        Robust send to MeshCore channel, using correct slot index (channel_index).
+        1. Get the channel slot index from channel_info or autodiscover if absent.
+        2. Send the message using that index.
+        3. Log and abort if the index cannot be found.
 
         Args:
             mc: MeshCore connection instance.
-            channel_info: Dict with channel metadata (must have 'channel_id' and optionally name).
+            channel_info: Dict with channel metadata (must have 'channel_id', 'channel_name', optionally 'channel_index').
             outgoing: Message to send (str).
             display_name: Sender display name for logging.
         """
-        # Place to inject overrides in future (eg. with HW/firmware slot/flood params)
         from meshcore.events import EventType  # type: ignore[import-untyped]
         from meshcore_helpers import send_channel_message_with_timestamp
 
-        channel_id = channel_info["channel_id"]
         channel_name = channel_info.get("channel_name", "?")
-
-        # ---
-        # [Override management would go here]
-        # ---
+        # 1. Use explicit index if present
+        channel_index = channel_info.get("channel_index")
+        if channel_index is None:
+            # Otherwise, try to autodiscover
+            # Look up by channel_id first (most robust), otherwise by name+key
+            channel_id = channel_info.get("channel_id")
+            found = None
+            for idx, chan in self._channels_by_idx.items():
+                if chan.get("channel_id") == channel_id:
+                    found = idx
+                    break
+            if found is not None:
+                channel_index = found
+            else:
+                # Fallback: search by name and key
+                for idx, chan in self._channels_by_idx.items():
+                    if chan.get("channel_name") == channel_name and chan.get("channel_key") == channel_info.get("channel_key"):
+                        channel_index = idx
+                        break
+        if channel_index is None:
+            self.logger.error(
+                "Could not find MeshCore slot index for channel %s (id=%s). Message not sent.",
+                channel_name,
+                channel_info.get("channel_id"),
+            )
+            return None
         try:
-            result = await send_channel_message_with_timestamp(mc, channel_id, outgoing)
+            result = await send_channel_message_with_timestamp(mc, channel_index, outgoing)
         except Exception as exc:
             self.logger.error(
-                "Failed to send to MeshCore channel %s: %s",
+                "Failed to send to MeshCore channel %s (slot %s): %s",
                 channel_name,
+                channel_index,
                 exc,
             )
-            # [Restore legacy state here if needed]
             return None
-
-        if result is not None and result.type == EventType.ERROR:
-            self.logger.error("MeshCore rejected channel message: %s", result.payload)
+        if result is not None and getattr(result, "type", None) == EventType.ERROR:
+            self.logger.error("MeshCore rejected channel message: %s", getattr(result, "payload", None))
         else:
             self.logger.info(
-                "Matrix→MeshCore [%s] %s: %s",
+                "Matrix→MeshCore [%s|slot %s] %s: %s",
                 channel_name,
+                channel_index,
                 display_name,
                 str(getattr(result,'message', ''))[:80],
             )
-        # [Restore any overridden state here]
         return result
+
 
     async def handle_meshtastic_message(
         self,
