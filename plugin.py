@@ -72,6 +72,12 @@ from meshcore_helpers import compute_channel_id
 
 from meshcore_helpers import compute_channel_id
 
+# Standard public channel keys for hashtag channels.
+PREDEFINED_PUBLIC_KEYS = {
+    "public": "8b3387e9c5cdea6ac9e5edbaa115cd72",
+    # (Extend here for future public hashtags)
+}
+
 def parse_channel_mapping(mapping: dict) -> dict | None:
     """Parse a channel mapping entry from config.
 
@@ -92,13 +98,17 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
     if not room or not name:
         return None
 
-    # Si canal es público y empieza por '#', computar channel_id igual que MeshCore (sin la #)
-    # Canonicalize: always strip leading # and whitespace (public channels)
+    # If channel is public (starts with '#'), canonicalize the name and fill standard key if empty
     canonical_name = name.lstrip('#').strip() if name else name
+    # For hashtag/public channel with empty key, auto-fill the well-known key (if registered)
+    if name.startswith('#') and (not key):
+        canonical_lc = canonical_name.lower()
+        if canonical_lc in PREDEFINED_PUBLIC_KEYS:
+            key = PREDEFINED_PUBLIC_KEYS[canonical_lc]
     result = {
         "matrix_room": room,
-        "channel_name": canonical_name,  # Store only canonical inside
-        "channel_key": key,  # May be None or empty for hashtag/public channels
+        "channel_name": canonical_name,  # Only canonical stored
+        "channel_key": key,  # Always filled for known publics
         "channel_id": compute_channel_id(canonical_name, key),
     }
     if index is not None:
@@ -708,7 +718,7 @@ class Plugin(BasePlugin):
         if (idx is not None and idx in self._channels_by_idx) or name in self._channels_by_name:
             return
 
-        # Store by name (solo el nombre real; alias '#' innecesario)
+        # Store by canonical name only (internal)
         entry = {
             "channel_name": name,
             "channel_key": key_hex,
@@ -722,7 +732,7 @@ class Plugin(BasePlugin):
         # Store reverse mapping
         self._channel_id_to_name[channel_id] = name
 
-        # Log único y robusto:
+        # Robust and unique logging for channel discovery:
         if not key_hex:
             self.logger.info("Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)", name, idx, channel_id[:8])
         else:
