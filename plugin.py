@@ -701,6 +701,10 @@ class Plugin(BasePlugin):
         key_hex = secret.hex()
         channel_id = compute_channel_id(name, key_hex)
 
+        # Avoid duplicate mapping & logging: only proceed if this idx and name are new
+        if (idx is not None and idx in self._channels_by_idx) or name in self._channels_by_name:
+            return
+
         # Store by name
         self._channels_by_name[name] = {
             "channel_name": name,
@@ -714,16 +718,11 @@ class Plugin(BasePlugin):
         # Store reverse mapping
         self._channel_id_to_name[channel_id] = name
 
-        # Avoid duplicate logging: only log if this idx or name wasn't mapped yet
-        if (idx is not None and idx in self._channels_by_idx) or name in self._channels_by_name:
-            return
-
+        # Log único y robusto:
         if not key_hex:
-            self.logger.info("Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)",
-                            name, idx, channel_id[:8])
+            self.logger.info("Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)", name, idx, channel_id[:8])
         else:
-            self.logger.info("Discovered MeshCore channel: %s (idx=%s, id=%s..., key=%s)",
-                            name, idx, channel_id[:8], key_hex)
+            self.logger.info("Discovered MeshCore channel: %s (idx=%s, id=%s..., key=%s)", name, idx, channel_id[:8], key_hex)
 
         # Replay and clear any buffered messages for this slot now that mapping is known
         if idx is not None:
