@@ -399,7 +399,10 @@ class Plugin(BasePlugin):
                 room = ch.get("matrix_room", "?")
                 name = ch.get("channel_name", "?")
                 key = ch.get("channel_key", "")
-                key_display = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "?"
+                if key:
+                    key_display = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else key
+                else:
+                    key_display = "Public/Unknown"
                 self.logger.info("    %s (key: %s)  →  %s", name, key_display, room)
         else:
             self.logger.warning("  ⚠️  No channel_mappings configured — relay inactive")
