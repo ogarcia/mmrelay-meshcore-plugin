@@ -101,10 +101,11 @@ def sanitize_text(text: str) -> str:
     text = text.replace("\t", " ")
     # Remove “zero width joiner/non-joiner”
     text = re.sub(r"[\u200b-\u200f\u202a-\u202e\ufeff]", "", text)
-    def truncate(text: str, max_bytes: int) -> str:
+def truncate(text: str, max_bytes: int) -> str:
     if len(text.encode("utf-8")) > max_bytes:
         # Truncate conservatively on character boundary.
         while len(text.encode("utf-8")) > max_bytes - 3:
             text = text[:-1]
         text += "…"
     return text
+
