@@ -844,6 +844,7 @@ class Plugin(BasePlugin):
         if reply_to:
             body = f"@[{reply_to}] {body}"
         body = sanitize_text(body)
+        self.logger.debug("Preparing MeshCore relay: prefix=%r body=%r", self._fmt_matrix_prefix(display_name), body)
         outgoing = truncate(self._fmt_matrix_prefix(display_name) + body, _MAX_MSG_LEN)
         if not outgoing.strip():
             self.logger.warning(
