@@ -130,6 +130,46 @@ CREATE TABLE IF NOT EXISTS meshcore_contacts (
 );
 ```
 
+## Development & Testing
+
+This plugin is designed to be easily testable and maintainable. All logic related to MeshCore messaging is decoupled into helpers, allowing unit tests to run without requiring the full mmrelay/Matrix runtime environment.
+
+### Development requirements
+
+- Python ≥ 3.10
+- Set up a virtual environment:
+  ```bash
+  python -m venv .venv
+  source .venv/bin/activate
+  pip install -r requirements.txt
+  pip install pytest pytest-asyncio
+  ```
+
+### Running unit tests
+
+To run unit tests:
+```
+source .venv/bin/activate
+pytest
+```
+
+#### Message size and content limits
+
+- MeshCore channel messages have a maximum size of 200 bytes. Longer messages will be truncated by the plugin.
+- Only printable UTF-8 characters are allowed. Control characters, tabs, and certain unicode zero-width characters are stripped during message processing.
+- Always sanitize content before sending (the plugin does this automatically).
+
+
+#### About the MeshCore helper
+
+The helper function for sending messages to MeshCore channels is decoupled in `meshcore_send_helper.py`. This pure function adds the timestamp and performs the send, and can be unit tested directly using mocks for the `mc` object and its methods.
+
+Note: the helper **does not sanitize** the message; always sanitize display names and message bodies before sending (the plugin applies this by default).
+
+For an example, see the real test at `tests/test_meshcore_send_helper.py`.
+
+---
+
 ## License
 
 GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.

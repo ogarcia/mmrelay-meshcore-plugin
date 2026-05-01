@@ -38,6 +38,16 @@ import sqlite3
 import time
 from typing import Any
 
+# Crypto dependencies for RAW MeshCore group decryption
+import hashlib
+import hmac
+try:
+    from Crypto.Cipher import AES
+except ImportError:
+    AES = None
+
+from meshcore_helpers import decrypt_group_text, DecryptedGroupText, truncate
+
 try:
     from nio import MatrixRoom, RoomMessageText
 except ImportError:
@@ -57,18 +67,10 @@ except ImportError:
 _MAX_MSG_LEN = 200
 
 
-def compute_channel_id(name: str, key: str) -> str:
-    """Compute MeshCore 64-hex channel ID from name and PSK key.
+from meshcore_helpers import compute_channel_id
 
-    For named channels with PSK, MeshCore requires a hashed channel ID
-    (64 hex chars, prefixed with 'ff') instead of a numeric index.
-    """
-    import hashlib
 
-    combined = f"{name}:{key}"
-    name_hash = hashlib.sha256(combined.encode()).hexdigest()
-    return "ff" + name_hash[2:]
-
+from meshcore_helpers import compute_channel_id
 
 def parse_channel_mapping(mapping: dict) -> dict | None:
     """Parse a channel mapping entry from config.
@@ -477,6 +479,9 @@ class Plugin(BasePlugin):
                 mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_msg)
                 mc.subscribe(EventType.CHANNEL_INFO, self._on_channel_info)
 
+                # Subscribe to RAW_DATA to log undecodable packets (RTfMC-style)
+                mc.subscribe(EventType.RAW_DATA, self._on_raw_data)
+
                 # Clear and reload channels on reconnect
                 self._channels_by_name.clear()
                 self._channel_id_to_name.clear()
@@ -602,6 +607,54 @@ class Plugin(BasePlugin):
                     await mc.ensure_contacts(follow=True)
                 except Exception as exc:
                     self.logger.debug("ensure_contacts after advertisement failed: %s", exc)
+
+    async def _on_raw_data(self, event: Any) -> None:
+        """
+        Handle RAW_DATA events: attempt MeshCore group decryption using all known channel keys.
+        If decryption succeeds, re-emit as a channel Matrix message; otherwise log at debug.
+
+        This brings RTfMC-style real-time decryption of channel (group) RAW packets to Matrix.
+        """
+        raw_bytes = event.payload if isinstance(event.payload, (bytes, bytearray)) else None
+        if not raw_bytes:
+            self.logger.debug("RAW_DATA event payload not bytes—ignoring")
+            return
+        decrypted = None
+        chan_name = None
+        chan_info = None
+        for name, chan in self._channels_by_name.items():
+            key_hex = chan.get("channel_key")
+            if not key_hex or len(key_hex) != 32 and len(key_hex) != 64:
+                continue
+            try:
+                key = bytes.fromhex(key_hex)
+            except Exception:
+                self.logger.debug(f"Invalid channel key hex for '{name}': {key_hex}")
+                continue
+            result = decrypt_group_text(raw_bytes, key)
+            if result:
+                decrypted = result
+                chan_name = name
+                chan_info = chan
+                break
+        if not decrypted or not chan_name:
+            self.logger.debug("RAW_DATA could not be decrypted with any channel key (payload_len=%d)", len(raw_bytes))
+            return
+        matrix_room = self._get_matrix_room_for_channel_name(chan_name)
+        if not matrix_room:
+            self.logger.debug("RAW_DATA decrypted but channel '%s' is unmapped to Matrix; message ignored", chan_name)
+            return
+        # Compose relay message like _on_channel_msg
+        channel_info = {"type": "named", "channel_name": chan_name}
+        prefix = self._fmt_channel_prefix(channel_info)
+        body = decrypted.message
+        if decrypted.sender:
+            body = f"{decrypted.sender}: {body}"
+        msg = prefix + body
+        self.logger.info("MeshCore RAW→Matrix [%s]: %s", chan_name, msg[:80])
+        await self.send_matrix_message(matrix_room, msg)
+
+    # ^^^^ This handler was added to provide RTfMC-grade packet decoding for RAW_DATA
 
     async def _on_channel_info(self, event: Any) -> None:
         """Handle CHANNEL_INFO events to auto-discover channel names and keys."""
@@ -760,28 +813,43 @@ class Plugin(BasePlugin):
             return
 
         if not isinstance(event, RoomMessageText):
+            self.logger.debug("Ignored non-text event from room %s", room.room_id)
             return
         if event.sender == bot_user_id:
+            self.logger.debug("Ignored message sent by the bot itself in room %s", room.room_id)
             return
         if event.server_timestamp < bot_start_time:
+            self.logger.debug("Ignored backlog message (before bot start) in room %s", room.room_id)
             return
 
         channel_info = self._get_channel_info_for_room(room.room_id)
         if channel_info is None:
+            self.logger.warning(
+                "No MeshCore mapping found for Matrix room %s; message discarded.",
+                room.room_id,
+            )
             return
 
+        from meshcore_helpers import sanitize_text
         try:
             display_name = room.user_name(event.sender) or event.sender
         except Exception:
             display_name = event.sender
         if not display_name:
             display_name = event.sender
+        display_name = sanitize_text(display_name)
 
         body = event.body or ""
         reply_to = await self._resolve_matrix_reply_target(room.room_id, event)
         if reply_to:
             body = f"@[{reply_to}] {body}"
-        outgoing = self._truncate(self._fmt_matrix_prefix(display_name) + body)
+        body = sanitize_text(body)
+        outgoing = truncate(self._fmt_matrix_prefix(display_name) + body, _MAX_MSG_LEN)
+        if not outgoing.strip():
+            self.logger.warning(
+                "Message from %s in room %s sanitized to empty string; not relayed to MeshCore.",
+                event.sender, room.room_id)
+            return
 
         mc = self._mc
         if mc is None or not mc.is_connected:
@@ -794,20 +862,8 @@ class Plugin(BasePlugin):
             from meshcore.events import EventType  # type: ignore[import-untyped]
 
             # Only named channels with PSK supported
-            channel_id = channel_info["channel_id"]
-            channel_name = channel_info.get("channel_name", "?")
-            result = await mc.commands.send_msg(channel_id, outgoing)
-            log_ch = channel_name
+            result = await self._send_channel_message_with_overrides(mc, channel_info, outgoing, display_name)
 
-            if result is not None and result.type == EventType.ERROR:
-                self.logger.error("MeshCore rejected channel message: %s", result.payload)
-            else:
-                self.logger.info(
-                    "Matrix→MeshCore [%s] %s: %s",
-                    log_ch,
-                    display_name,
-                    outgoing[:80],
-                )
         except Exception as exc:
             self.logger.error(
                 "Failed to send to MeshCore channel %s: %s",
@@ -816,6 +872,53 @@ class Plugin(BasePlugin):
             )
 
     # ── Matrix → MeshCore ─────────────────────────────────────────────────────
+
+    async def _send_channel_message_with_overrides(self, mc, channel_info, outgoing, display_name):
+        """
+        Robust send to MeshCore channel, allowing slot/channel overrides in future.
+        Steps:
+        1. (Placeholder) Set channel overrides or flood scope/hashmode if needed. (No-op in default)
+        2. Send message atomically.
+        3. Restore overrides/state if applicable.
+
+        Args:
+            mc: MeshCore connection instance.
+            channel_info: Dict with channel metadata (must have 'channel_id' and optionally name).
+            outgoing: Message to send (str).
+            display_name: Sender display name for logging.
+        """
+        # Place to inject overrides in future (eg. with HW/firmware slot/flood params)
+        from meshcore.events import EventType  # type: ignore[import-untyped]
+        from meshcore_helpers import send_channel_message_with_timestamp
+
+        channel_id = channel_info["channel_id"]
+        channel_name = channel_info.get("channel_name", "?")
+
+        # ---
+        # [Override management would go here]
+        # ---
+        try:
+            result = await send_channel_message_with_timestamp(mc, channel_id, outgoing)
+        except Exception as exc:
+            self.logger.error(
+                "Failed to send to MeshCore channel %s: %s",
+                channel_name,
+                exc,
+            )
+            # [Restore legacy state here if needed]
+            return None
+
+        if result is not None and result.type == EventType.ERROR:
+            self.logger.error("MeshCore rejected channel message: %s", result.payload)
+        else:
+            self.logger.info(
+                "Matrix→MeshCore [%s] %s: %s",
+                channel_name,
+                display_name,
+                str(getattr(result,'message', ''))[:80],
+            )
+        # [Restore any overridden state here]
+        return result
 
     async def handle_meshtastic_message(
         self,
@@ -904,10 +1007,3 @@ class Plugin(BasePlugin):
 
         return None
 
-    def _truncate(self, text: str) -> str:
-        if len(text.encode("utf-8")) > _MAX_MSG_LEN:
-            # Truncate conservatively on character boundary.
-            while len(text.encode("utf-8")) > _MAX_MSG_LEN - 3:
-                text = text[:-1]
-            text += "…"
-        return text
