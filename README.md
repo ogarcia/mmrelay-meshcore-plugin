@@ -147,10 +147,13 @@ This plugin is designed to be easily testable and maintainable. All logic relate
 
 ### Running unit tests
 
+All tests are located in the `.tests/` directory (note the leading dot).
+This ensures they are never loaded by the plugin system at runtime.
+
 To run unit tests:
 ```
 source .venv/bin/activate
-pytest
+pytest .tests
 ```
 
 #### Message size and content limits
@@ -166,7 +169,12 @@ The helper function for sending messages to MeshCore channels is decoupled in `m
 
 Note: the helper **does not sanitize** the message; always sanitize display names and message bodies before sending (the plugin applies this by default).
 
-For an example, see the real test at `tests/test_meshcore_send_helper.py`.
+For an example, see the real test at `.tests/test_meshcore_send_helper.py`.
+
+**Important:**
+
+- Never place test files or extra code directly in the plugin directory. Use a directory such as `.tests/` to avoid accidental loading by the plugin host (mmrelay and similar systems will try to import all top-level .py files and subdirectories).
+- This structure allows you to include as many dev/test files as needed without risk of breaking plugin deployment or requiring test dependencies like `pytest` in production.
 
 ---
 
