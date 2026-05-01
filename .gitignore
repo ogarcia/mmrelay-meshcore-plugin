@@ -30,3 +30,6 @@ htmlcov/
 
 # VSCode
 .vscode/
+
+# mmrelay plugins: ignore all local tests
+.tests/
