@@ -504,6 +504,30 @@ class Plugin(BasePlugin):
                 # Populate contacts on startup.
                 await mc.ensure_contacts()
 
+                # Proactively scan all slots like the standalone slot listing script.
+                class _EventLike:
+                    def __init__(self, payload):
+                        self.payload = payload
+                self.logger.info("Proactively scanning all MeshCore slots for channel info (non-event driven)")
+                for idx in range(32):
+                    try:
+                        info = await mc.commands.get_channel(idx)
+                        if info and hasattr(info, "payload") and info.payload.get('channel_name'):
+                            payload = info.payload
+                            name = payload.get('channel_name', '')
+                            secret = payload.get('channel_secret', b"")
+                            key_hex = secret.hex() if isinstance(secret, (bytes, bytearray)) else str(secret)
+                            channel_id = compute_channel_id(name, key_hex)
+                            if not key_hex:
+                                self.logger.info(
+                                    "[Active Scan] Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)", name, idx, channel_id[:8])
+                            else:
+                                self.logger.info(
+                                    "[Active Scan] Discovered MeshCore channel: %s (idx=%s, id=%s..., key=%s)", name, idx, channel_id[:8], key_hex)
+                            await self._on_channel_info(_EventLike(payload))
+                    except Exception:
+                        continue
+
                 # Drain all messages already queued in the node before going live.
                 # start_auto_message_fetching() only calls get_msg() once at startup
                 # and relies on MESSAGES_WAITING to fetch the rest, which means
