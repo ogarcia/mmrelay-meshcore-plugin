@@ -758,6 +758,7 @@ class Plugin(BasePlugin):
         before connecting to Matrix, so we poll until it is available.
         """
         if self._matrix_callback_registered:
+            self.logger.warning("Matrix callback setup called when already registered! Double registration? Call stack or bug?")
             return
 
         from mmrelay.matrix_utils import matrix_client as _mc_ref
@@ -823,6 +824,7 @@ class Plugin(BasePlugin):
             return
 
         channel_info = self._get_channel_info_for_room(room.room_id)
+        self.logger.debug("Diagnostic: channel_info=%r for room_id=%r", channel_info, room.room_id)
         if channel_info is None:
             self.logger.warning(
                 "No MeshCore mapping found for Matrix room %s; message discarded.",
@@ -838,6 +840,7 @@ class Plugin(BasePlugin):
         if not display_name:
             display_name = event.sender
         display_name = sanitize_text(display_name)
+        self.logger.debug("Diagnostic: display_name=%r sender=%r", display_name, event.sender)
 
         body = event.body or ""
         reply_to = await self._resolve_matrix_reply_target(room.room_id, event)
@@ -846,6 +849,7 @@ class Plugin(BasePlugin):
         body = sanitize_text(body)
         self.logger.debug("Preparing MeshCore relay: prefix=%r body=%r", self._fmt_matrix_prefix(display_name), body)
         outgoing = sanitize_text(self._fmt_matrix_prefix(display_name) + body)
+        self.logger.debug("Diagnostic: Ready to send Matrix→MeshCore outgoing=%r channel_id=%r channel_name=%r", outgoing, channel_info.get('channel_id') if channel_info else None, channel_info.get('channel_name') if channel_info else None)
         if not outgoing.strip():
             self.logger.warning(
                 "Message from %s in room %s sanitized to empty string; not relayed to MeshCore.",
@@ -909,6 +913,7 @@ class Plugin(BasePlugin):
             # [Restore legacy state here if needed]
             return None
 
+        self.logger.debug("Diagnostic: MeshCore send result for channel_id=%r: %r", channel_id, getattr(result, 'type', None))
         if result is not None and result.type == EventType.ERROR:
             self.logger.error("MeshCore rejected channel message: %s", result.payload)
         else:
