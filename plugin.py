@@ -705,16 +705,20 @@ class Plugin(BasePlugin):
         if (idx is not None and idx in self._channels_by_idx) or name in self._channels_by_name:
             return
 
-        # Store by name
-        self._channels_by_name[name] = {
+        # Store by name (and alias with # for public channels)
+        entry = {
             "channel_name": name,
             "channel_key": key_hex,
             "channel_id": channel_id,
             "channel_idx": idx,
         }
+        self._channels_by_name[name] = entry
+        # For public channels (not starting with #), also store alias with #
+        if not name.startswith("#"):
+            self._channels_by_name["#"+name] = entry
         # Store by index for quick lookup
         if idx is not None:
-            self._channels_by_idx[idx] = self._channels_by_name[name]
+            self._channels_by_idx[idx] = entry
         # Store reverse mapping
         self._channel_id_to_name[channel_id] = name
 
