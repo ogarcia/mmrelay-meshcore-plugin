@@ -696,7 +696,7 @@ class Plugin(BasePlugin):
         if decrypted.sender:
             body = f"{decrypted.sender}: {body}"
         msg = prefix + body
-        self.logger.info("MeshCore RAW→Matrix [%s]: %s", chan_name, msg[:80])
+        self.logger.info("MeshCore RAW→Matrix [%s]: %s", chan_name, msg[:77] + ('…' if len(msg) > 80 else ''))
         await self.send_matrix_message(matrix_room, msg)
 
     # ^^^^ This handler was added to provide RTfMC-grade packet decoding for RAW_DATA
@@ -791,7 +791,7 @@ class Plugin(BasePlugin):
         prefix = self._fmt_channel_prefix(channel_info)
         full_msg = prefix + text
 
-        self.logger.info("MeshCore→Matrix [%s]: %s", channel_name, text[:80])
+        self.logger.info("MeshCore→Matrix [%s]: %s", channel_name, text[:77] + ('…' if len(text) > 80 else ''))
         await self.send_matrix_message(matrix_room, full_msg)
 
     async def _on_contact_msg(self, event: Any) -> None:
@@ -814,8 +814,7 @@ class Plugin(BasePlugin):
         full_msg = prefix + text
 
         self.logger.info(
-            "MeshCore→Matrix [DM] %s: %s", sender_name or pubkey_prefix[:8], text[:80]
-        )
+            "MeshCore→Matrix [DM] %s: %s", sender_name or pubkey_prefix[:8], text[:77] + ('…' if len(text) > 80 else ''))
         await self.send_matrix_message(dm_room, full_msg)
 
     async def _setup_matrix_callback(self) -> None:
@@ -1051,7 +1050,7 @@ class Plugin(BasePlugin):
                 canonical_name,
                 channel_index,
                 display_name,
-                str(getattr(result,'message', ''))[:80],
+                outgoing[:77] + ('…' if len(outgoing) > 80 else ''),
             )
         return result
 
