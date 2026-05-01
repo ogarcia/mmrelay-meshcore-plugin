@@ -93,10 +93,11 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
         return None
 
     # Si canal es público y empieza por '#', computar channel_id igual que MeshCore (sin la #)
-    canonical_name = name[1:] if name and name.startswith('#') else name
+    # Canonicalize: always strip leading # and whitespace (public channels)
+    canonical_name = name.lstrip('#').strip() if name else name
     result = {
         "matrix_room": room,
-        "channel_name": name,
+        "channel_name": canonical_name,  # Store only canonical inside
         "channel_key": key,  # May be None or empty for hashtag/public channels
         "channel_id": compute_channel_id(canonical_name, key),
     }
@@ -983,12 +984,13 @@ class Plugin(BasePlugin):
         from meshcore.events import EventType  # type: ignore[import-untyped]
         from meshcore_helpers import send_channel_message_with_timestamp
 
-        channel_name = channel_info.get("channel_name", "?")
+        raw_name = channel_info.get("channel_name", "?")
+        canonical_name = raw_name.lstrip('#').strip() if raw_name else raw_name
         channel_index = channel_info.get("channel_index")
         if channel_index is None:
-            # Otherwise, try to autodiscover
-            # Look up by channel_id as is (should always match due to parse_channel_mapping normalization)
-            channel_id = channel_info.get("channel_id")
+            # Always recompute the canonical channel_id for robust lookup
+            from meshcore_helpers import compute_channel_id
+            channel_id = compute_channel_id(canonical_name, channel_info.get("channel_key") or "")
             found = None
             for idx, chan in self._channels_by_idx.items():
                 if chan.get("channel_id") == channel_id:
@@ -997,29 +999,29 @@ class Plugin(BasePlugin):
             if found is not None:
                 channel_index = found
             else:
-                # Fallback: search by name and key as is
+                # Fallback: search by name and key, canonical only
                 for idx, chan in self._channels_by_idx.items():
-                    if chan.get("channel_name") == channel_name and chan.get("channel_key") == channel_info.get("channel_key"):
+                    if chan.get("channel_name") == canonical_name and chan.get("channel_key") == channel_info.get("channel_key"):
                         channel_index = idx
                         break
         if channel_index is None:
             self.logger.error(
                 "Could not find MeshCore slot index for channel %s (id=%s). Message not sent.",
-                channel_name,
+                canonical_name,
                 channel_info.get("channel_id"),
             )
             return None
         try:
             self.logger.debug(
                 "Sending Matrix→MeshCore (slot %s, channel: %s, user: %s): %r",
-                channel_index, channel_name, display_name, outgoing[:80],
+                channel_index, canonical_name, display_name, outgoing[:80],
             )
             result = await send_channel_message_with_timestamp(mc, channel_index, outgoing)
         except Exception as exc:
             # Always log on error
             self.logger.error(
                 "Failed to send to MeshCore channel %s (slot %s): %s (original message: %r)",
-                channel_name,
+                canonical_name,
                 channel_index,
                 exc,
                 outgoing[:80],
@@ -1029,14 +1031,14 @@ class Plugin(BasePlugin):
         if result is None:
             self.logger.debug(
                 "send_channel_message_with_timestamp returned None for slot %s, channel %s (user: %s, msg: %r)",
-                channel_index, channel_name, display_name, outgoing[:80],
+                channel_index, canonical_name, display_name, outgoing[:80],
             )
         elif getattr(result, "type", None) == EventType.ERROR:
             self.logger.error("MeshCore rejected channel message: %s", getattr(result, "payload", None))
         else:
             self.logger.info(
                 "Matrix→MeshCore [%s|slot %s] %s: %s",
-                channel_name,
+                canonical_name,
                 channel_index,
                 display_name,
                 str(getattr(result,'message', ''))[:80],
