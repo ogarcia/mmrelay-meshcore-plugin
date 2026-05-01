@@ -89,7 +89,7 @@ async def send_channel_message_with_timestamp(mc, channel_index, message):
     timestamp_ms = int(time.time() * 1000)
     prefix = f"[{timestamp_ms:x}] "
     outgoing_with_ts = prefix + message
-    return await mc.commands.send_msg(channel_index, outgoing_with_ts)
+    return await mc.commands.send_chan_msg(channel_index, outgoing_with_ts)
 
 _timestamp_regex = re.compile(r"^\[([0-9a-f]+)\] (.*)")
 def has_timestamp_prefix(text):
