@@ -46,7 +46,7 @@ try:
 except ImportError:
     AES = None
 
-from meshcore_helpers import decrypt_group_text, DecryptedGroupText, truncate
+from meshcore_helpers import decrypt_group_text, DecryptedGroupText, sanitize_text
 
 try:
     from nio import MatrixRoom, RoomMessageText
@@ -845,7 +845,7 @@ class Plugin(BasePlugin):
             body = f"@[{reply_to}] {body}"
         body = sanitize_text(body)
         self.logger.debug("Preparing MeshCore relay: prefix=%r body=%r", self._fmt_matrix_prefix(display_name), body)
-        outgoing = truncate(self._fmt_matrix_prefix(display_name) + body, _MAX_MSG_LEN)
+        outgoing = sanitize_text(self._fmt_matrix_prefix(display_name) + body)
         if not outgoing.strip():
             self.logger.warning(
                 "Message from %s in room %s sanitized to empty string; not relayed to MeshCore.",

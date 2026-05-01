@@ -83,6 +83,8 @@ def has_timestamp_prefix(text):
     return bool(m)
 
 # --- Sanitization helper ---
+_MAX_MSG_LEN = 512  # Bytes, adjust if protocol requires
+
 def sanitize_text(text: str) -> str:
     """
     Strongly sanitize a string to be safe for MeshCore and Matrix interoperable systems:
@@ -90,21 +92,26 @@ def sanitize_text(text: str) -> str:
     - Normalize unicode
     - Replace or strip suspicious whitespace (tabs, etc)
     - Trim trailing/leading whitespace (optional)
+    - Truncate message to _MAX_MSG_LEN bytes utf-8, append '…' if cut
+    Always returns str, never None
     """
-    if not text:
+    if text is None:
         return ""
     # Normalize unicode
-    text = unicodedata.normalize("NFKC", text)
+    text = unicodedata.normalize("NFKC", str(text))
     # Remove C0/C1 controls except \n
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
     # Remove tabs explicitly
     text = text.replace("\t", " ")
-    # Remove “zero width joiner/non-joiner”
+    # Remove zero width joiner/non-joiner
     text = re.sub(r"[\u200b-\u200f\u202a-\u202e\ufeff]", "", text)
-def truncate(text: str, max_bytes: int) -> str:
-    if len(text.encode("utf-8")) > max_bytes:
-        # Truncate conservatively on character boundary.
-        while len(text.encode("utf-8")) > max_bytes - 3:
+    # Strip leading/trailing spaces/tabs/etc, but not newlines
+    text = text.strip(" \t\r\f\v")
+    # Truncate to _MAX_MSG_LEN bytes (utf-8 safe, ellipsis if cut)
+    encoded = text.encode("utf-8")
+    if len(encoded) > _MAX_MSG_LEN:
+        # Truncate on character boundary within byte limit
+        while len(text.encode("utf-8")) > _MAX_MSG_LEN - 3:
             text = text[:-1]
         text += "…"
     return text
