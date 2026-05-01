@@ -80,10 +80,12 @@ def compute_channel_id(name: str, key: str) -> str:
 async def send_channel_message_with_timestamp(mc, channel_index, message):
     """
     Send a message to MeshCore channel **index** (slot), adding a unique timestamp prefix.
+    Sanitizes message to remove control/non-printable characters reliably.
     channel_index: Integer index (slot) of the MeshCore channel (not channel_id/hash/key).
     Returns the result of mc.commands.send_msg(channel_index, message).
     Pure helper, does not depend on plugin or logging.
     """
+    message = sanitize_text(message)
     timestamp_ms = int(time.time() * 1000)
     prefix = f"[{timestamp_ms:x}] "
     outgoing_with_ts = prefix + message

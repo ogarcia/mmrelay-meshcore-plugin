@@ -62,7 +62,7 @@ async def test_send_channel_message_with_timestamp(monkeypatch):
     assert sent_body == message
 
 @pytest.mark.asyncio
-async def test_send_channel_message_handles_errors(caplog):
+async def test_send_channel_message_handles_errors():
     plugin = Plugin()
     plugin.logger = MagicMock()
     mc = MagicMock()
@@ -74,4 +74,8 @@ async def test_send_channel_message_handles_errors(caplog):
     msg = "Error msg"
     # Should not throw, should log the error
     await plugin._send_channel_message_with_overrides(mc, channel_info, msg, "User")
-    assert any("Failed to send to MeshCore channel" in r.message for r in caplog.records)
+    # Check that logger.error was called with the expected string
+    assert plugin.logger.error.called
+    call_args = plugin.logger.error.call_args[0][0]
+    assert "Failed to send to MeshCore channel" in call_args
+
