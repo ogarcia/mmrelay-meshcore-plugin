@@ -518,12 +518,6 @@ class Plugin(BasePlugin):
                             secret = payload.get('channel_secret', b"")
                             key_hex = secret.hex() if isinstance(secret, (bytes, bytearray)) else str(secret)
                             channel_id = compute_channel_id(name, key_hex)
-                            if not key_hex:
-                                self.logger.info(
-                                    "[Active Scan] Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)", name, idx, channel_id[:8])
-                            else:
-                                self.logger.info(
-                                    "[Active Scan] Discovered MeshCore channel: %s (idx=%s, id=%s..., key=%s)", name, idx, channel_id[:8], key_hex)
                             await self._on_channel_info(_EventLike(payload))
                     except Exception:
                         continue
@@ -720,8 +714,12 @@ class Plugin(BasePlugin):
         # Store reverse mapping
         self._channel_id_to_name[channel_id] = name
 
-        self.logger.info("Discovered MeshCore channel: %s (idx=%s, id=%s...)",
-                        name, idx, channel_id[:8])
+        if not key_hex:
+            self.logger.info("Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)",
+                            name, idx, channel_id[:8])
+        else:
+            self.logger.info("Discovered MeshCore channel: %s (idx=%s, id=%s..., key=%s)",
+                            name, idx, channel_id[:8], key_hex)
 
         # Replay and clear any buffered messages for this slot now that mapping is known
         if idx is not None:
