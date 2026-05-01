@@ -123,6 +123,23 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
 class Plugin(BasePlugin):
     """Bridge between Matrix rooms and MeshCore radio channels."""
 
+    # ── Deduplication logic ─────────────────────────────────────────────────
+    def _is_duplicate_meshcore_message(self, channel_name, sender, text):
+        """
+        Returns True if a MeshCore→Matrix channel message is a duplicate (same channel, sender, text, within 5s)
+        """
+        now = time.time()
+        key = (channel_name, sender or "", text or "")
+        last = self._last_sent_for_channel.get(key)
+        if last and (now - last < 5.0):
+            return True
+        self._last_sent_for_channel[key] = now
+        # Also, purge old entries
+        stale = [k for k, v in self._last_sent_for_channel.items() if now - v > 8.0]
+        for k in stale:
+            del self._last_sent_for_channel[k]
+        return False
+
     plugin_name = "meshcore-matrix-relay"
 
     # ── Init ──────────────────────────────────────────────────────────────────
@@ -144,6 +161,7 @@ class Plugin(BasePlugin):
         # Pending MeshCore messages awaiting slot mapping (idx: list of (timestamp, msg_dict))
         self._pending_slot_messages: dict[int, list[tuple[float, dict]]] = {}
         self._init_db()
+        self._last_sent_for_channel = {}
 
     # ── DB helpers ────────────────────────────────────────────────────────────
 
@@ -693,9 +711,15 @@ class Plugin(BasePlugin):
         channel_info = {"type": "named", "channel_name": chan_name}
         prefix = self._fmt_channel_prefix(channel_info)
         body = decrypted.message
-        if decrypted.sender:
-            body = f"{decrypted.sender}: {body}"
+        sender = decrypted.sender or ""
+        if sender:
+            body = f"{sender}: {body}"
         msg = prefix + body
+        if self._is_duplicate_meshcore_message(chan_name, sender, decrypted.message):
+            self.logger.debug(
+                "MeshCore RAW_DATA duplicate for [%s] from [%s], ignored: %s", chan_name, sender, body[:77] + ('…' if len(body) > 80 else '')
+            )
+            return
         self.logger.info("MeshCore RAW→Matrix [%s]: %s", chan_name, msg[:77] + ('…' if len(msg) > 80 else ''))
         await self.send_matrix_message(matrix_room, msg)
 
@@ -785,6 +809,25 @@ class Plugin(BasePlugin):
         matrix_room = self._get_matrix_room_for_channel_name(channel_name)
         if not matrix_room:
             self.logger.debug("Channel %s message dropped (no Matrix room mapped)", channel_name)
+            return
+
+        # Deduplication logic: sender extraction
+        sender = None
+        if ": " in text:
+            sender = text.split(": ", 1)[0].strip()
+            # If sender equals channel name, treat as no sender
+            if sender == channel_name:
+                sender = ''
+        else:
+            sender = ''
+        plain_body = text
+        if sender:
+            plain_body = text[len(sender) + 2:] if text.startswith(sender + ': ') else text
+
+        if self._is_duplicate_meshcore_message(channel_name, sender, plain_body):
+            self.logger.debug(
+                "MeshCore CHANNEL_MSG_RECV duplicate for [%s] from [%s], ignored: %s", channel_name, sender, plain_body[:77] + ('…' if len(plain_body) > 80 else '')
+            )
             return
 
         channel_info = {"type": "named", "channel_name": channel_name}
