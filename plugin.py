@@ -888,6 +888,16 @@ class Plugin(BasePlugin):
         try:
             from meshcore.events import EventType  # type: ignore[import-untyped]
 
+            self.logger.info(
+                "Relaying Matrix→MeshCore: room=%s user=%s display_name=%s slot=%s channel=%s original=%r outgoing=%r",
+                room.room_id,
+                event.sender,
+                display_name,
+                channel_info.get("channel_index"),
+                channel_info.get("channel_name"),
+                event.body,
+                outgoing,
+            )
             # Only named channels with PSK supported
             result = await self._send_channel_message_with_overrides(mc, channel_info, outgoing, display_name)
 
