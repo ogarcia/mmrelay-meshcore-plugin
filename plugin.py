@@ -714,6 +714,10 @@ class Plugin(BasePlugin):
         # Store reverse mapping
         self._channel_id_to_name[channel_id] = name
 
+        # Avoid duplicate logging: only log if this idx or name wasn't mapped yet
+        if (idx is not None and idx in self._channels_by_idx) or name in self._channels_by_name:
+            return
+
         if not key_hex:
             self.logger.info("Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)",
                             name, idx, channel_id[:8])
