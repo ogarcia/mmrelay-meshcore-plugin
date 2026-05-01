@@ -92,11 +92,13 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
     if not room or not name:
         return None
 
+    # Si canal es público y empieza por '#', computar channel_id igual que MeshCore (sin la #)
+    canonical_name = name[1:] if name and name.startswith('#') else name
     result = {
         "matrix_room": room,
         "channel_name": name,
         "channel_key": key,  # May be None or empty for hashtag/public channels
-        "channel_id": compute_channel_id(name, key),
+        "channel_id": compute_channel_id(canonical_name, key),
     }
     if index is not None:
         try:
