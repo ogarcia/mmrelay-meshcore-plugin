@@ -687,6 +687,16 @@ class Plugin(BasePlugin):
                     for c in self._channels_by_name.values()
                 ])
 
+                for mapping in self._channel_mappings():
+                    name = mapping["channel_name"]
+                    if name not in self._channels_by_name:
+                        self.logger.warning(
+                            "Channel '%s' from config not found on MeshCore node. "
+                            "Consider adding 'meshcore_channel_index' to your channel mapping "
+                            "or ensure the node has been rebooted.",
+                            name
+                        )
+
                 # Drain all messages already queued in the node before going live.
                 # start_auto_message_fetching() only calls get_msg() once at startup
                 # and relies on MESSAGES_WAITING to fetch the rest, which means
