@@ -1106,6 +1106,7 @@ class Plugin(BasePlugin):
         body = sanitize_text(body)
         self.logger.debug("Preparing MeshCore relay: prefix=%r body=%r", self._fmt_matrix_prefix(display_name), body)
         outgoing = sanitize_text(self._fmt_matrix_prefix(display_name) + body)
+        truncated = len(outgoing.encode("utf-8")) > _MAX_MSG_LEN
         if not outgoing.strip():
             self.logger.warning(
                 "Message from %s in room %s sanitized to empty string; not relayed to MeshCore.",
@@ -1120,14 +1121,16 @@ class Plugin(BasePlugin):
             return
 
         try:
+            outgoing_label = f"outgoing{'[TRUNCATED]' if truncated else ''}="
             self.logger.info(
-                "Relaying Matrix→MeshCore: room=%s user=%s display_name=%s slot=%s channel=%s original=%r outgoing=%r",
+                "Relaying Matrix→MeshCore: room=%s user=%s display_name=%s slot=%s channel=%s original=%r %s%r",
                 room.room_id,
                 event.sender,
                 display_name,
                 channel_info.get("channel_index"),
                 channel_info.get("channel_name"),
                 event.body,
+                outgoing_label,
                 outgoing,
             )
             # Only named channels with PSK supported
