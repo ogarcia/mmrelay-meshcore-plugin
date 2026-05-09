@@ -32,35 +32,51 @@ Requires mmrelay >= 1.4 and meshcore >= 2.3.7.
 from __future__ import annotations
 
 import asyncio
-import importlib
-import os
-import sqlite3
-import time
-from typing import Any, Optional
-
-try:
-    from nio import RoomMessageText
-except ImportError:
-    pass  # resolved at runtime inside mmrelay's environment
-
-try:
-    from mmrelay.log_utils import get_logger
-    from mmrelay.plugin_loader import PLUGIN_STATE_FILENAME
-    from mmrelay.plugins.base_plugin import BasePlugin
-except ImportError:
-    from plugins.base_plugin import BasePlugin  # type: ignore[no-redef]
-    PLUGIN_STATE_FILENAME = ".mmrelay-plugin-state.json"
-
 import hashlib
 import hmac
+import importlib
+import os
 import re
+import sqlite3
+import time
 import unicodedata
 from collections import namedtuple
+from typing import Any, Optional
 
 try:
     from Crypto.Cipher import AES
 except ImportError:
     AES = None
+
+try:
+    from meshcore.events import EventType
+    from meshcore import MeshCore  # noqa: F401
+except ImportError:
+    EventType = None  # type: ignore
+    MeshCore = None  # type: ignore
+
+try:
+    from nio import RoomMessageText, RoomGetEventResponse
+except ImportError:
+    RoomMessageText = None  # type: ignore
+    RoomGetEventResponse = None  # type: ignore
+
+try:
+    from mmrelay.log_utils import get_logger
+    from mmrelay.plugin_loader import PLUGIN_STATE_FILENAME
+    from mmrelay.plugins.base_plugin import BasePlugin
+    from mmrelay import meshtastic_utils
+    from mmrelay.db_utils import get_db_path
+    from mmrelay.matrix_utils import matrix_client, join_matrix_room, bot_start_time, bot_user_id
+except ImportError:
+    from plugins.base_plugin import BasePlugin  # type: ignore[no-redef]
+    PLUGIN_STATE_FILENAME = ".mmrelay-plugin-state.json"
+    meshtastic_utils = None  # type: ignore
+    get_db_path = None  # type: ignore
+    matrix_client = None  # type: ignore
+    join_matrix_room = None  # type: ignore
+    bot_start_time = None  # type: ignore
+    bot_user_id = None  # type: ignore
 
 DecryptedGroupText = namedtuple('DecryptedGroupText', ['timestamp', 'flags', 'sender', 'message', 'channel_hash'])
 
@@ -288,8 +304,6 @@ class Plugin(BasePlugin):
     # ── DB helpers ────────────────────────────────────────────────────────────
 
     def _db_connect(self) -> sqlite3.Connection:
-        from mmrelay.db_utils import get_db_path
-
         conn = sqlite3.connect(get_db_path())
         conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
@@ -478,13 +492,10 @@ class Plugin(BasePlugin):
         super().start()
         self._log_config()
 
-        # Verify meshcore is importable in this thread (where mmrelay has already
-        # set up sys.path).  If not, clear the mmrelay plugin install-state cache
-        # so that the next startup triggers a fresh requirements installation.
-        try:
-            importlib.invalidate_caches()
-            import meshcore  # noqa: F401  # type: ignore[import-untyped]
-        except ImportError:
+        # Verify meshcore is importable (already imported at module level).
+        # Invalidate caches to ensure mmrelay's sys.path is used.
+        importlib.invalidate_caches()
+        if MeshCore is None:
             self._clear_plugin_install_state()
             self.logger.error(
                 "meshcore package not found — plugin install cache cleared. "
@@ -493,8 +504,6 @@ class Plugin(BasePlugin):
             return
 
         try:
-            from mmrelay import meshtastic_utils  # type: ignore[attr-defined]
-
             loop = meshtastic_utils.event_loop
             if loop is None:
                 self.logger.error(
@@ -579,8 +588,6 @@ class Plugin(BasePlugin):
         if mc is not None:
             self._mc = None
             try:
-                from mmrelay import meshtastic_utils  # type: ignore[attr-defined]
-
                 loop = meshtastic_utils.event_loop
                 if loop and loop.is_running():
                     asyncio.run_coroutine_threadsafe(mc.disconnect(), loop)
@@ -604,9 +611,6 @@ class Plugin(BasePlugin):
         """Main reconnection and message relay loop (runs after meshcore is importable)."""
         await self._setup_matrix_callback()
 
-        from meshcore.events import EventType  # type: ignore[import-untyped]
-
-        conn_cfg: dict = self.config.get("connection") or {}
         conn_type: str = conn_cfg.get("type", "tcp")
         reconnect_delay = self._MAX_RECONNECT_DELAY
 
@@ -736,8 +740,6 @@ class Plugin(BasePlugin):
         self.logger.info("MeshCore listener stopped")
 
     async def _connect_meshcore(self, conn_cfg: dict) -> Any:
-        from meshcore import MeshCore  # type: ignore[import-untyped]
-
         conn_type: str = conn_cfg.get("type", "tcp")
 
         # auto_reconnect and max_reconnect_attempts are intentionally not
@@ -1015,15 +1017,11 @@ class Plugin(BasePlugin):
             self.logger.error("Matrix client never became available; Matrix→MeshCore relay disabled")
             return
 
-        from nio import RoomMessageText  # type: ignore[import-untyped]
         mc_client.add_event_callback(self._on_matrix_room_message, RoomMessageText)
         self._matrix_callback_registered = True
         self.logger.info("Matrix room message callback registered")
 
-        # Join all rooms defined in channel_mappings so the bot receives events.
-        try:
-            from mmrelay.matrix_utils import join_matrix_room  # type: ignore[attr-defined]
-        except ImportError:
+        if join_matrix_room is None:
             self.logger.warning("join_matrix_room not available; rooms may not be joined")
             return
 
@@ -1042,10 +1040,7 @@ class Plugin(BasePlugin):
         Registered directly on the nio client so it fires for all rooms the bot
         has joined, independently of mmrelay's matrix_rooms configuration.
         """
-        try:
-            from mmrelay.matrix_utils import bot_start_time, bot_user_id  # type: ignore[attr-defined]
-            from nio import RoomMessageText  # type: ignore[import-untyped]
-        except ImportError:
+        if RoomMessageText is None or bot_start_time is None or bot_user_id is None:
             return
 
         if not isinstance(event, RoomMessageText):
@@ -1093,8 +1088,6 @@ class Plugin(BasePlugin):
             return
 
         try:
-            from meshcore.events import EventType  # type: ignore[import-untyped]
-
             self.logger.info(
                 "Relaying Matrix→MeshCore: room=%s user=%s display_name=%s slot=%s channel=%s original=%r outgoing=%r",
                 room.room_id,
@@ -1162,8 +1155,6 @@ class Plugin(BasePlugin):
             outgoing: Message to send (str).
             display_name: Sender display name for logging.
         """
-        from meshcore.events import EventType  # type: ignore[import-untyped]
-
         raw_name = channel_info.get("channel_name", "?")
         canonical_name = raw_name.lstrip('#').strip() if raw_name else raw_name
         channel_index = channel_info.get("channel_index")
