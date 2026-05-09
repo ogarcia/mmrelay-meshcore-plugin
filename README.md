@@ -161,13 +161,12 @@ This plugin is designed to be easily testable and maintainable.
 
 ### Running unit tests
 
-All tests are located in the `.tests/` directory (note the leading dot).
-This ensures they are never loaded by the plugin system at runtime.
+All tests are located in the `tests/` directory with mocks for mmrelay dependencies.
 
 To run unit tests:
 ```
 source .venv/bin/activate
-pytest .tests
+pytest tests/
 ```
 
 #### Message size and content limits
