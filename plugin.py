@@ -64,9 +64,19 @@ except ImportError:
 
 DecryptedGroupText = namedtuple('DecryptedGroupText', ['timestamp', 'flags', 'sender', 'message', 'channel_hash'])
 
-_MAX_MSG_LEN = 512
+_MAX_MSG_LEN = 200
 
 def decrypt_group_text(payload: bytes, channel_key: bytes) -> Optional[DecryptedGroupText]:
+    """Decrypt a MeshCore group (channel) text packet using the channel key.
+
+    Args:
+        payload: Raw bytes from a RAW_DATA event.
+        channel_key: 32-byte channel key for HMAC verification and AES decryption.
+
+    Returns:
+        DecryptedGroupText with timestamp, flags, sender, message, and channel_hash.
+        Returns None if decryption or verification fails.
+    """
     if len(payload) < 3 or AES is None:
         return None
     channel_hash = format(payload[0], "02x")
@@ -106,6 +116,19 @@ def decrypt_group_text(payload: bytes, channel_key: bytes) -> Optional[Decrypted
     return DecryptedGroupText(timestamp, flags, sender, content, channel_hash)
 
 def compute_channel_id(name: str, key: str) -> str:
+    """Compute the MeshCore channel ID for a given channel name and key.
+
+    Args:
+        name: Channel name (e.g. "GALICIA" or "#Public").
+        key: 32-character hex channel key. Empty for public channels.
+
+    Returns:
+        Uppercase 32-character hex string: either the key itself (for named
+        channels with PSK) or SHA256(name)[:16].hex() for public channels.
+
+    Raises:
+        ValueError: If key is provided but is not exactly 32 hex characters.
+    """
     key = (key or '').strip()
     name = (name or '').strip()
     if key and not name.startswith('#'):
@@ -117,6 +140,16 @@ def compute_channel_id(name: str, key: str) -> str:
     return hash16.hex().upper()
 
 async def send_channel_message_with_timestamp(mc, channel_index, message):
+    """Send a message to a MeshCore channel slot with a timestamp prefix.
+
+    Args:
+        mc: MeshCore connection instance.
+        channel_index: Integer slot index of the MeshCore channel.
+        message: Message text to send.
+
+    Returns:
+        Result of mc.commands.send_chan_msg().
+    """
     message = sanitize_text(message)
     timestamp_ms = int(time.time() * 1000)
     prefix = f"[{timestamp_ms:x}] "
@@ -125,10 +158,20 @@ async def send_channel_message_with_timestamp(mc, channel_index, message):
 
 _timestamp_regex = re.compile(r"^\[([0-9a-f]+)\] (.*)")
 def has_timestamp_prefix(text):
+    """Check if text has a timestamp prefix in the format [HEX_TIMESTAMP] ."""
     m = _timestamp_regex.match(text or "")
     return bool(m)
 
 def sanitize_text(text: str) -> str:
+    """Sanitize text for MeshCore: normalize unicode, remove controls, truncate.
+
+    Args:
+        text: Input text to sanitize.
+
+    Returns:
+        Sanitized string safe for MeshCore and Matrix interoperability.
+        Strips control chars, tabs, zero-width chars, and truncates to 200 bytes.
+    """
     if text is None:
         return ""
     text = unicodedata.normalize("NFKC", str(text))
@@ -1016,8 +1059,6 @@ class Plugin(BasePlugin):
             display_name = room.user_name(event.sender) or event.sender
         except Exception:
             display_name = event.sender
-        if not display_name:
-            display_name = event.sender
         display_name = sanitize_text(display_name)
 
         body = event.body or ""
@@ -1065,7 +1106,7 @@ class Plugin(BasePlugin):
 
     # ── Buffer Cleanup Utility ───────────────────────────────────────────────
 
-    async def _cleanup_pending_slot_messages(self):
+    async def _cleanup_pending_slot_messages(self) -> None:
         """
         Discard pending buffered slot messages that have been waiting too long (default: >5 seconds).
         This prevents memory leaks/race; warn for any lost messages.
@@ -1111,19 +1152,13 @@ class Plugin(BasePlugin):
         channel_index = channel_info.get("channel_index")
         if channel_index is None:
             channel_id = compute_channel_id(canonical_name, channel_info.get("channel_key") or "")
-            found = None
+            channel_key = channel_info.get("channel_key")
             for idx, chan in self._channels_by_idx.items():
-                if chan.get("channel_id") == channel_id:
-                    found = idx
+                if chan.get("channel_id") == channel_id or (
+                    chan.get("channel_name") == canonical_name and chan.get("channel_key") == channel_key
+                ):
+                    channel_index = idx
                     break
-            if found is not None:
-                channel_index = found
-            else:
-                # Fallback: search by name and key, canonical only
-                for idx, chan in self._channels_by_idx.items():
-                    if chan.get("channel_name") == canonical_name and chan.get("channel_key") == channel_info.get("channel_key"):
-                        channel_index = idx
-                        break
         if channel_index is None:
             self.logger.error(
                 "Could not find MeshCore slot index for channel %s (id=%s). Message not sent.",
@@ -1241,8 +1276,9 @@ class Plugin(BasePlugin):
 
         # Strip any prefix brackets like "[mesh]: " before looking for "NodeName: "
         text = original_body.strip()
-        if text.startswith("[") and "]: " in text:
-            text = text[text.index("]: ") + 3:]
+        idx = text.find("]: ")
+        if idx != -1:
+            text = text[idx + 3:]
 
         if ": " not in text:
             return None
