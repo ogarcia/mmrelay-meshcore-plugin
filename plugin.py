@@ -226,8 +226,8 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
     if index is not None:
         try:
             result["channel_index"] = int(index)
-        except Exception:
-            pass  # Ignore, log/warn can be added if needed
+        except ValueError:
+            pass
     return result
 
 
@@ -243,16 +243,26 @@ class Plugin(BasePlugin):
         now = time.time()
         key = (channel_name, sender or "", text or "")
         last = self._last_sent_for_channel.get(key)
-        if last and (now - last < 5.0):
+        if last and (now - last < self._DEDUP_WINDOW_SECS):
             return True
         self._last_sent_for_channel[key] = now
-        # Also, purge old entries
-        stale = [k for k, v in self._last_sent_for_channel.items() if now - v > 8.0]
+        stale = [k for k, v in self._last_sent_for_channel.items() if now - v > self._DEDUP_STALE_SECS]
         for k in stale:
             del self._last_sent_for_channel[k]
         return False
 
     plugin_name = "meshcore-matrix-relay"
+
+    # ── Constants ──────────────────────────────────────────────────────────────
+    _DEDUP_WINDOW_SECS = 5.0
+    _DEDUP_STALE_SECS = 8.0
+    _CLEANUP_INTERVAL_SECS = 60.0
+    _MAX_CHANNEL_SLOTS = 32
+    _MAX_RECONNECT_DELAY = 30
+    _MAX_CONNECT_TIMEOUT = 30
+    _MAX_PENDING_MSG_TIMEOUT = 5.0
+    _MATRIX_CLIENT_TIMEOUT = 120
+    _MAX_SENDER_NAME_LEN = 30
 
     # ── Init ──────────────────────────────────────────────────────────────────
 
@@ -301,7 +311,7 @@ class Plugin(BasePlugin):
                     )
                     """
                 )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             self.logger.error("Failed to initialise meshcore_contacts table: %s", exc)
 
     def _upsert_contacts(self, contacts: Any) -> None:
@@ -342,7 +352,7 @@ class Plugin(BasePlugin):
                     """,
                     rows,
                 )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             self.logger.error("Failed to upsert MeshCore contacts: %s", exc)
 
     def _touch_contact(self, pubkey: str) -> None:
@@ -353,7 +363,7 @@ class Plugin(BasePlugin):
                     "UPDATE meshcore_contacts SET last_seen = ? WHERE pubkey_prefix = ?",
                     (int(time.time()), pubkey),
                 )
-        except Exception as exc:
+        except sqlite3.Error as exc:
             self.logger.debug("Could not touch contact %s: %s", pubkey[:8], exc)
 
     def _lookup_name_by_prefix(self, hex_prefix: str) -> str | None:
@@ -384,7 +394,7 @@ class Plugin(BasePlugin):
                     )
                 return None
             return rows[0]["adv_name"] if rows[0]["adv_name"] else None
-        except Exception as exc:
+        except sqlite3.Error as exc:
             self.logger.debug("DB lookup failed for prefix %s: %s", hex_prefix[:8], exc)
             return None
 
@@ -598,7 +608,7 @@ class Plugin(BasePlugin):
 
         conn_cfg: dict = self.config.get("connection") or {}
         conn_type: str = conn_cfg.get("type", "tcp")
-        reconnect_delay = 30
+        reconnect_delay = self._MAX_RECONNECT_DELAY
 
         if conn_type == "tcp":
             target = f"{conn_cfg.get('host', 'localhost')}:{conn_cfg.get('port', 5000)}"
@@ -609,7 +619,7 @@ class Plugin(BasePlugin):
         else:
             target = "?"
 
-        connect_timeout = 30
+        connect_timeout = self._MAX_CONNECT_TIMEOUT
 
         while not self._stop_event.is_set():
             mc = None
@@ -652,7 +662,7 @@ class Plugin(BasePlugin):
                     def __init__(self, payload):
                         self.payload = payload
                 self.logger.info("Proactively scanning all MeshCore slots for channel info (non-event driven)")
-                for idx in range(32):
+                for idx in range(self._MAX_CHANNEL_SLOTS):
                     try:
                         info = await mc.commands.get_channel(idx)
                         if info and hasattr(info, "payload") and info.payload.get('channel_name'):
@@ -690,7 +700,7 @@ class Plugin(BasePlugin):
 
                 self.logger.info("MeshCore relay running — listening for messages")
 
-                # Periodic cleanup counter (runs every ~60s)
+                cleanup_interval = self._CLEANUP_INTERVAL_SECS / 5.0
                 cleanup_counter = 0
                 while not self._stop_event.is_set():
                     if not mc.is_connected:
@@ -698,8 +708,9 @@ class Plugin(BasePlugin):
                         break
                     await asyncio.sleep(5)
                     cleanup_counter += 1
-                    if cleanup_counter >= 12:
+                    if cleanup_counter >= cleanup_interval:
                         await self._cleanup_pending_slot_messages()
+                        self._cleanup_last_sent_cache()
                         cleanup_counter = 0
 
             except asyncio.CancelledError:
@@ -991,7 +1002,7 @@ class Plugin(BasePlugin):
         mc_client = _mc_ref
         if mc_client is None:
             self.logger.debug("Waiting for Matrix client to become available…")
-            for _ in range(120):
+            for _ in range(self._MATRIX_CLIENT_TIMEOUT):
                 if self._stop_event.is_set():
                     return
                 await asyncio.sleep(1)
@@ -1107,17 +1118,16 @@ class Plugin(BasePlugin):
     # ── Buffer Cleanup Utility ───────────────────────────────────────────────
 
     async def _cleanup_pending_slot_messages(self) -> None:
-        """
-        Discard pending buffered slot messages that have been waiting too long (default: >5 seconds).
-        This prevents memory leaks/race; warn for any lost messages.
+        """Discard pending buffered slot messages that have been waiting too long.
+
+        This prevents memory leaks; warn for any lost messages.
         """
         now = time.time()
-        TIMEOUT = 5.0
         stale_slots = []
         for idx, lst in self._pending_slot_messages.items():
             still_valid = []
             for ts, msg in lst:
-                if now - ts > TIMEOUT:
+                if now - ts > self._MAX_PENDING_MSG_TIMEOUT:
                     self.logger.warning(
                         "Slot idx=%d message dropped after %0.1fs pending (mapping/channel_info never received): %r",
                         idx, now - ts, msg)
@@ -1129,6 +1139,13 @@ class Plugin(BasePlugin):
                 stale_slots.append(idx)
         for idx in stale_slots:
             del self._pending_slot_messages[idx]
+
+    def _cleanup_last_sent_cache(self) -> None:
+        """Remove stale entries from the deduplication cache."""
+        now = time.time()
+        stale = [k for k, v in self._last_sent_for_channel.items() if now - v > self._DEDUP_STALE_SECS]
+        for k in stale:
+            del self._last_sent_for_channel[k]
 
     # ── Matrix → MeshCore ─────────────────────────────────────────────────────
 
@@ -1284,7 +1301,7 @@ class Plugin(BasePlugin):
             return None
 
         candidate = text.split(": ", 1)[0].strip()
-        if candidate and len(candidate) <= 30 and not candidate.startswith(("@", "!", "[")):
+        if candidate and len(candidate) <= self._MAX_SENDER_NAME_LEN and not candidate.startswith(("@", "!", "[")):
             return candidate
 
         return None
