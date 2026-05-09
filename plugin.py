@@ -611,6 +611,7 @@ class Plugin(BasePlugin):
         """Main reconnection and message relay loop (runs after meshcore is importable)."""
         await self._setup_matrix_callback()
 
+        conn_cfg: dict = self.config.get("connection") or {}
         conn_type: str = conn_cfg.get("type", "tcp")
         reconnect_delay = self._MAX_RECONNECT_DELAY
 
