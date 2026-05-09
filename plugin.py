@@ -1101,6 +1101,8 @@ class Plugin(BasePlugin):
             )
             # Only named channels with PSK supported
             result = await self._send_channel_message_with_overrides(mc, channel_info, outgoing, display_name)
+            if result is not None and getattr(result, "type", None) != EventType.ERROR:
+                self.logger.info("Message relayed to MeshCore channel %s", channel_info.get("channel_name"))
 
         except Exception as exc:
             self.logger.error(
@@ -1193,9 +1195,9 @@ class Plugin(BasePlugin):
             return None
         # Always log at debug what happened
         if result is None:
-            self.logger.debug(
-                "send_channel_message_with_timestamp returned None for slot %s, channel %s (user: %s, msg: %r)",
-                channel_index, canonical_name, display_name, outgoing[:80],
+            self.logger.warning(
+                "Message could not be sent to MeshCore channel %s (slot %s, user: %s, msg: %r): no response",
+                canonical_name, channel_index, display_name, outgoing[:80],
             )
         elif getattr(result, "type", None) == EventType.ERROR:
             self.logger.error("MeshCore rejected channel message: %s", getattr(result, "payload", None))
