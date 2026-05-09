@@ -1041,11 +1041,22 @@ class Plugin(BasePlugin):
         Registered directly on the nio client so it fires for all rooms the bot
         has joined, independently of mmrelay's matrix_rooms configuration.
         """
-        self.logger.debug("Processing Matrix message in room %s", room.room_id)
-        if RoomMessageText is None or bot_start_time is None or bot_user_id is None:
-            self.logger.error("Missing Matrix dependencies: RoomMessageText=%s bot_start_time=%s bot_user_id=%s",
-                             RoomMessageText, bot_start_time, bot_user_id)
+        if RoomMessageText is None:
             return
+        if bot_user_id is None:
+            try:
+                from mmrelay.matrix_utils import bot_user_id as _uid
+                if _uid is not None:
+                    globals()['bot_user_id'] = _uid
+            except Exception:
+                pass
+        if bot_start_time is None:
+            try:
+                from mmrelay.matrix_utils import bot_start_time as _time
+                if _time is not None:
+                    globals()['bot_start_time'] = _time
+            except Exception:
+                pass
 
         if not isinstance(event, RoomMessageText):
             self.logger.debug("Ignored non-text event from room %s", room.room_id)
