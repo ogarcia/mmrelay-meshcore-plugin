@@ -667,10 +667,12 @@ class Plugin(BasePlugin):
                     def __init__(self, payload):
                         self.payload = payload
                 self.logger.info("Proactively scanning all MeshCore slots for channel info (non-event driven)")
+                channels_found = 0
                 for idx in range(self._MAX_CHANNEL_SLOTS):
                     try:
                         info = await mc.commands.get_channel(idx)
                         if info and hasattr(info, "payload") and info.payload.get('channel_name'):
+                            channels_found += 1
                             payload = info.payload
                             name = payload.get('channel_name', '')
                             secret = payload.get('channel_secret', b"")
@@ -679,6 +681,11 @@ class Plugin(BasePlugin):
                             await self._on_channel_info(_EventLike(payload))
                     except Exception:
                         continue
+                self.logger.info("Channel scan complete: found %d channel(s)", channels_found)
+                self.logger.debug("MeshCore channels discovered: %s", [
+                    {"name": c["channel_name"], "idx": c.get("channel_idx"), "id": c["channel_id"][:8]}
+                    for c in self._channels_by_name.values()
+                ])
 
                 # Drain all messages already queued in the node before going live.
                 # start_auto_message_fetching() only calls get_msg() once at startup
