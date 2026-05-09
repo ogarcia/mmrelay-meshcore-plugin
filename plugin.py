@@ -36,20 +36,10 @@ import importlib
 import os
 import sqlite3
 import time
-from typing import Any
-
-# Crypto dependencies for RAW MeshCore group decryption
-import hashlib
-import hmac
-try:
-    from Crypto.Cipher import AES
-except ImportError:
-    AES = None
-
-from meshcore_helpers import decrypt_group_text, DecryptedGroupText, sanitize_text
+from typing import Any, Optional
 
 try:
-    from nio import MatrixRoom, RoomMessageText
+    from nio import RoomMessageText
 except ImportError:
     pass  # resolved at runtime inside mmrelay's environment
 
@@ -60,22 +50,101 @@ try:
 except ImportError:
     from plugins.base_plugin import BasePlugin  # type: ignore[no-redef]
     PLUGIN_STATE_FILENAME = ".mmrelay-plugin-state.json"
-    # fallback, matches mmrelay default
 
-# Max MeshCore radio message length (bytes).
-# Most firmware variants cap at ~200 bytes.
-_MAX_MSG_LEN = 200
+import hashlib
+import hmac
+import re
+import unicodedata
+from collections import namedtuple
 
+try:
+    from Crypto.Cipher import AES
+except ImportError:
+    AES = None
 
-from meshcore_helpers import compute_channel_id
+DecryptedGroupText = namedtuple('DecryptedGroupText', ['timestamp', 'flags', 'sender', 'message', 'channel_hash'])
 
+_MAX_MSG_LEN = 512
 
-from meshcore_helpers import compute_channel_id
+def decrypt_group_text(payload: bytes, channel_key: bytes) -> Optional[DecryptedGroupText]:
+    if len(payload) < 3 or AES is None:
+        return None
+    channel_hash = format(payload[0], "02x")
+    cipher_mac = payload[1:3]
+    ciphertext = payload[3:]
+    if len(ciphertext) == 0 or len(ciphertext) % 16 != 0:
+        return None
+    channel_secret = channel_key + bytes(16)
+    calculated_mac = hmac.new(channel_secret, ciphertext, hashlib.sha256).digest()
+    if calculated_mac[:2] != cipher_mac:
+        return None
+    try:
+        cipher = AES.new(channel_key, AES.MODE_ECB)
+        decrypted = cipher.decrypt(ciphertext)
+    except Exception:
+        return None
+    if len(decrypted) < 5:
+        return None
+    timestamp = int.from_bytes(decrypted[0:4], "little")
+    flags = decrypted[4]
+    msg_bytes = decrypted[5:]
+    try:
+        msg_text = msg_bytes.decode("utf-8")
+        null_idx = msg_text.find("\x00")
+        if null_idx >= 0:
+            msg_text = msg_text[:null_idx]
+    except Exception:
+        return None
+    sender = None
+    content = msg_text
+    colon_idx = msg_text.find(": ")
+    if 0 < colon_idx < 50:
+        candidate = msg_text[:colon_idx]
+        if not any(c in candidate for c in ":[]\x00"):
+            sender = candidate
+            content = msg_text[colon_idx+2:]
+    return DecryptedGroupText(timestamp, flags, sender, content, channel_hash)
 
-# Standard public channel keys for hashtag channels.
+def compute_channel_id(name: str, key: str) -> str:
+    key = (key or '').strip()
+    name = (name or '').strip()
+    if key and not name.startswith('#'):
+        key_hex = key.upper()
+        if len(key_hex) == 32 and all(c in "0123456789ABCDEF" for c in key_hex):
+            return key_hex
+        raise ValueError(f"Channel key must be 32 hex characters. Got: {key!r}")
+    hash16 = hashlib.sha256(name.encode('utf-8')).digest()[:16]
+    return hash16.hex().upper()
+
+async def send_channel_message_with_timestamp(mc, channel_index, message):
+    message = sanitize_text(message)
+    timestamp_ms = int(time.time() * 1000)
+    prefix = f"[{timestamp_ms:x}] "
+    outgoing_with_ts = prefix + message
+    return await mc.commands.send_chan_msg(channel_index, outgoing_with_ts)
+
+_timestamp_regex = re.compile(r"^\[([0-9a-f]+)\] (.*)")
+def has_timestamp_prefix(text):
+    m = _timestamp_regex.match(text or "")
+    return bool(m)
+
+def sanitize_text(text: str) -> str:
+    if text is None:
+        return ""
+    text = unicodedata.normalize("NFKC", str(text))
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+    text = text.replace("\t", " ")
+    text = re.sub(r"[\u200b-\u200f\u202a-\u202e\ufeff]", "", text)
+    text = text.strip(" \t\r\f\v")
+    encoded = text.encode("utf-8")
+    if len(encoded) > _MAX_MSG_LEN:
+        while len(text.encode("utf-8")) > _MAX_MSG_LEN - 3:
+            text = text[:-1]
+        text += "…"
+    return text
+
 PREDEFINED_PUBLIC_KEYS = {
     "public": "8b3387e9c5cdea6ac9e5edbaa115cd72",
-    # (Extend here for future public hashtags)
 }
 
 def parse_channel_mapping(mapping: dict) -> dict | None:
@@ -578,12 +647,17 @@ class Plugin(BasePlugin):
 
                 self.logger.info("MeshCore relay running — listening for messages")
 
-                # Wait until stopped or disconnected.
+                # Periodic cleanup counter (runs every ~60s)
+                cleanup_counter = 0
                 while not self._stop_event.is_set():
                     if not mc.is_connected:
                         self.logger.warning("❌ MeshCore device disconnected; will reconnect in %ss", reconnect_delay)
                         break
                     await asyncio.sleep(5)
+                    cleanup_counter += 1
+                    if cleanup_counter >= 12:
+                        await self._cleanup_pending_slot_messages()
+                        cleanup_counter = 0
 
             except asyncio.CancelledError:
                 self.logger.info("MeshCore listener cancelled")
@@ -738,22 +812,20 @@ class Plugin(BasePlugin):
         key_hex = secret.hex()
         channel_id = compute_channel_id(name, key_hex)
 
-        # Avoid duplicate mapping & logging: only proceed if this idx and name are new
-        if (idx is not None and idx in self._channels_by_idx) or name in self._channels_by_name:
-            return
-
-        # Store by canonical name only (internal)
         entry = {
             "channel_name": name,
             "channel_key": key_hex,
             "channel_id": channel_id,
             "channel_idx": idx,
         }
+
+        # Avoid duplicate mapping: use setdefault for atomic insert.
+        # If the name or idx already exists, skip adding a duplicate entry.
+        if name in self._channels_by_name or (idx is not None and idx in self._channels_by_idx):
+            return
         self._channels_by_name[name] = entry
-        # Store by index for quick lookup
         if idx is not None:
             self._channels_by_idx[idx] = entry
-        # Store reverse mapping
         self._channel_id_to_name[channel_id] = name
 
         # Robust and unique logging for channel discovery:
@@ -940,7 +1012,6 @@ class Plugin(BasePlugin):
             )
             return
 
-        from meshcore_helpers import sanitize_text
         try:
             display_name = room.user_name(event.sender) or event.sender
         except Exception:
@@ -1034,14 +1105,11 @@ class Plugin(BasePlugin):
             display_name: Sender display name for logging.
         """
         from meshcore.events import EventType  # type: ignore[import-untyped]
-        from meshcore_helpers import send_channel_message_with_timestamp
 
         raw_name = channel_info.get("channel_name", "?")
         canonical_name = raw_name.lstrip('#').strip() if raw_name else raw_name
         channel_index = channel_info.get("channel_index")
         if channel_index is None:
-            # Always recompute the canonical channel_id for robust lookup
-            from meshcore_helpers import compute_channel_id
             channel_id = compute_channel_id(canonical_name, channel_info.get("channel_key") or "")
             found = None
             for idx, chan in self._channels_by_idx.items():
