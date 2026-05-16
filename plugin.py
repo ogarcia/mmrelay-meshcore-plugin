@@ -667,17 +667,18 @@ class Plugin(BasePlugin):
                     target,
                 )
 
+                async def _on_channel_msg_wrapper(e):
+                    await self._on_channel_msg(e.payload)
+
+                async def _on_channel_info_wrapper(e):
+                    await self._on_channel_info(e.payload)
+
                 mc.subscribe(EventType.CONTACTS, self._on_contacts)
                 mc.subscribe(EventType.NEW_CONTACT, self._on_new_contact)
                 mc.subscribe(EventType.ADVERTISEMENT, self._on_advertisement)
-                mc.subscribe(
-                    EventType.CHANNEL_MSG_RECV,
-                    lambda e: self._on_channel_msg(e.payload),
-                )
+                mc.subscribe(EventType.CHANNEL_MSG_RECV, _on_channel_msg_wrapper)
                 mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_msg)
-                mc.subscribe(
-                    EventType.CHANNEL_INFO, lambda e: self._on_channel_info(e.payload)
-                )
+                mc.subscribe(EventType.CHANNEL_INFO, _on_channel_info_wrapper)
 
                 # Subscribe to RAW_DATA to log undecodable packets (RTfMC-style)
                 mc.subscribe(EventType.RAW_DATA, self._on_raw_data)
