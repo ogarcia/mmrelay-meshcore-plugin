@@ -62,14 +62,19 @@ except ImportError:
     RoomGetEventResponse = None  # type: ignore
 
 try:
-    from mmrelay.log_utils import get_logger
     from mmrelay.plugin_loader import PLUGIN_STATE_FILENAME
     from mmrelay.plugins.base_plugin import BasePlugin
     from mmrelay import meshtastic_utils
     from mmrelay.db_utils import get_db_path
-    from mmrelay.matrix_utils import matrix_client, join_matrix_room, bot_start_time, bot_user_id
+    from mmrelay.matrix_utils import (
+        matrix_client,
+        join_matrix_room,
+        bot_start_time,
+        bot_user_id,
+    )
 except ImportError:
     from plugins.base_plugin import BasePlugin  # type: ignore[no-redef]
+
     PLUGIN_STATE_FILENAME = ".mmrelay-plugin-state.json"
     meshtastic_utils = None  # type: ignore
     get_db_path = None  # type: ignore
@@ -78,11 +83,16 @@ except ImportError:
     bot_start_time = None  # type: ignore
     bot_user_id = None  # type: ignore
 
-DecryptedGroupText = namedtuple('DecryptedGroupText', ['timestamp', 'flags', 'sender', 'message', 'channel_hash'])
+DecryptedGroupText = namedtuple(
+    "DecryptedGroupText", ["timestamp", "flags", "sender", "message", "channel_hash"]
+)
 
 _MAX_MSG_LEN = 200
 
-def decrypt_group_text(payload: bytes, channel_key: bytes) -> Optional[DecryptedGroupText]:
+
+def decrypt_group_text(
+    payload: bytes, channel_key: bytes
+) -> Optional[DecryptedGroupText]:
     """Decrypt a MeshCore group (channel) text packet using the channel key.
 
     Args:
@@ -128,8 +138,9 @@ def decrypt_group_text(payload: bytes, channel_key: bytes) -> Optional[Decrypted
         candidate = msg_text[:colon_idx]
         if not any(c in candidate for c in ":[]\x00"):
             sender = candidate
-            content = msg_text[colon_idx+2:]
+            content = msg_text[colon_idx + 2 :]
     return DecryptedGroupText(timestamp, flags, sender, content, channel_hash)
+
 
 def compute_channel_id(name: str, key: str) -> str:
     """Compute the MeshCore channel ID for a given channel name and key.
@@ -145,15 +156,16 @@ def compute_channel_id(name: str, key: str) -> str:
     Raises:
         ValueError: If key is provided but is not exactly 32 hex characters.
     """
-    key = (key or '').strip()
-    name = (name or '').strip()
-    if key and not name.startswith('#'):
+    key = (key or "").strip()
+    name = (name or "").strip()
+    if key and not name.startswith("#"):
         key_hex = key.upper()
         if len(key_hex) == 32 and all(c in "0123456789ABCDEF" for c in key_hex):
             return key_hex
         raise ValueError(f"Channel key must be 32 hex characters. Got: {key!r}")
-    hash16 = hashlib.sha256(name.encode('utf-8')).digest()[:16]
+    hash16 = hashlib.sha256(name.encode("utf-8")).digest()[:16]
     return hash16.hex().upper()
+
 
 async def send_channel_message_with_timestamp(mc, channel_index, message):
     """Send a message to a MeshCore channel slot with a timestamp prefix.
@@ -172,11 +184,6 @@ async def send_channel_message_with_timestamp(mc, channel_index, message):
     outgoing_with_ts = prefix + message
     return await mc.commands.send_chan_msg(channel_index, outgoing_with_ts)
 
-_timestamp_regex = re.compile(r"^\[([0-9a-f]+)\] (.*)")
-def has_timestamp_prefix(text):
-    """Check if text has a timestamp prefix in the format [HEX_TIMESTAMP] ."""
-    m = _timestamp_regex.match(text or "")
-    return bool(m)
 
 def sanitize_text(text: str) -> str:
     """Sanitize text for MeshCore: normalize unicode, remove controls, truncate.
@@ -202,9 +209,11 @@ def sanitize_text(text: str) -> str:
         text += "…"
     return text
 
+
 PREDEFINED_PUBLIC_KEYS = {
     "public": "8b3387e9c5cdea6ac9e5edbaa115cd72",
 }
+
 
 def parse_channel_mapping(mapping: dict) -> dict | None:
     """Parse a channel mapping entry from config.
@@ -227,9 +236,9 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
         return None
 
     # If channel is public (starts with '#'), canonicalize the name and fill standard key if empty
-    canonical_name = name.lstrip('#').strip() if name else name
+    canonical_name = name.lstrip("#").strip() if name else name
     # For hashtag/public channel with empty key, auto-fill the well-known key (if registered)
-    if name.startswith('#') and (not key):
+    if name.startswith("#") and (not key):
         canonical_lc = canonical_name.lower()
         if canonical_lc in PREDEFINED_PUBLIC_KEYS:
             key = PREDEFINED_PUBLIC_KEYS[canonical_lc]
@@ -247,7 +256,6 @@ def parse_channel_mapping(mapping: dict) -> dict | None:
     return result
 
 
-
 class Plugin(BasePlugin):
     """Bridge between Matrix rooms and MeshCore radio channels."""
 
@@ -262,7 +270,11 @@ class Plugin(BasePlugin):
         if last and (now - last < self._DEDUP_WINDOW_SECS):
             return True
         self._last_sent_for_channel[key] = now
-        stale = [k for k, v in self._last_sent_for_channel.items() if now - v > self._DEDUP_STALE_SECS]
+        stale = [
+            k
+            for k, v in self._last_sent_for_channel.items()
+            if now - v > self._DEDUP_STALE_SECS
+        ]
         for k in stale:
             del self._last_sent_for_channel[k]
         return False
@@ -300,6 +312,9 @@ class Plugin(BasePlugin):
         self._pending_slot_messages: dict[int, list[tuple[float, dict]]] = {}
         self._init_db()
         self._last_sent_for_channel = {}
+        self._cached_mappings: list[dict] | None = None
+        self._bot_user_id: str | None = None
+        self._bot_start_time: int | None = None
 
     # ── DB helpers ────────────────────────────────────────────────────────────
 
@@ -416,14 +431,17 @@ class Plugin(BasePlugin):
 
     def _channel_mappings(self) -> list[dict]:
         """Return validated channel mappings (only named channels with PSK)."""
+        if self._cached_mappings is not None:
+            return self._cached_mappings
         raw = self.config.get("channel_mappings") or []
-        result = []
+        result: list[dict] = []
         for m in raw:
             parsed = parse_channel_mapping(m)
             if parsed:
                 result.append(parsed)
             else:
                 self.logger.warning("Invalid channel mapping ignored: %s", m)
+        self._cached_mappings = result
         return result
 
     def _get_matrix_room_for_channel_name(self, channel_name: str) -> str | None:
@@ -448,6 +466,19 @@ class Plugin(BasePlugin):
 
     def _mesh_name(self) -> str:
         return self.config.get("mesh_name", "MeshCore")
+
+    def _connection_info(self) -> tuple[str, str]:
+        conn_cfg: dict = self.config.get("connection") or {}
+        conn_type: str = conn_cfg.get("type", "tcp")
+        if conn_type == "tcp":
+            target = f"{conn_cfg.get('host', 'localhost')}:{conn_cfg.get('port', 5000)}"
+        elif conn_type == "serial":
+            target = conn_cfg.get("serial_port", "/dev/ttyUSB0")
+        elif conn_type == "ble":
+            target = conn_cfg.get("ble_address", "<scan>")
+        else:
+            target = "?"
+        return conn_type, target
 
     def _fmt_channel_prefix(self, channel_info: dict) -> str:
         """Format prefix for channel messages.
@@ -537,18 +568,7 @@ class Plugin(BasePlugin):
 
     def _log_config(self) -> None:
         """Log startup summary of the active configuration."""
-        conn_cfg: dict = self.config.get("connection") or {}
-        conn_type: str = conn_cfg.get("type", "tcp")
-
-        if conn_type == "tcp":
-            target = f"{conn_cfg.get('host', 'localhost')}:{conn_cfg.get('port', 5000)}"
-        elif conn_type == "serial":
-            target = conn_cfg.get("serial_port", "/dev/ttyUSB0")
-        elif conn_type == "ble":
-            target = conn_cfg.get("ble_address", "<scan>")
-        else:
-            target = "?"
-
+        conn_type, target = self._connection_info()
         mappings = self._channel_mappings()
         dm_room = self._dm_room()
 
@@ -556,7 +576,9 @@ class Plugin(BasePlugin):
         self.logger.info("  Connection : %s  →  %s", conn_type.upper(), target)
 
         if mappings:
-            self.logger.info("  MeshCore Channels ↔ Matrix Rooms (%d configured):", len(mappings))
+            self.logger.info(
+                "  MeshCore Channels ↔ Matrix Rooms (%d configured):", len(mappings)
+            )
             for ch in mappings:
                 room = ch.get("matrix_room", "?")
                 name = ch.get("channel_name", "?")
@@ -600,7 +622,8 @@ class Plugin(BasePlugin):
             if exc:
                 self.logger.error(
                     "MeshCore listener exited with unhandled exception: %s",
-                    exc, exc_info=exc,
+                    exc,
+                    exc_info=exc,
                 )
         except Exception:
             pass
@@ -612,44 +635,49 @@ class Plugin(BasePlugin):
         await self._setup_matrix_callback()
 
         conn_cfg: dict = self.config.get("connection") or {}
-        conn_type: str = conn_cfg.get("type", "tcp")
+        conn_type, target = self._connection_info()
         reconnect_delay = self._MAX_RECONNECT_DELAY
-
-        if conn_type == "tcp":
-            target = f"{conn_cfg.get('host', 'localhost')}:{conn_cfg.get('port', 5000)}"
-        elif conn_type == "serial":
-            target = conn_cfg.get("serial_port", "/dev/ttyUSB0")
-        elif conn_type == "ble":
-            target = conn_cfg.get("ble_address", "<scan>")
-        else:
-            target = "?"
 
         connect_timeout = self._MAX_CONNECT_TIMEOUT
 
         while not self._stop_event.is_set():
             mc = None
             try:
-                self.logger.info("Connecting to MeshCore device (%s → %s)…", conn_type.upper(), target)
+                self.logger.info(
+                    "Connecting to MeshCore device (%s → %s)…",
+                    conn_type.upper(),
+                    target,
+                )
                 mc = await asyncio.wait_for(
                     self._connect_meshcore(conn_cfg),
                     timeout=connect_timeout,
                 )
                 if mc is None:
                     self.logger.error(
-                        "Could not connect to MeshCore; retrying in %ss", reconnect_delay
+                        "Could not connect to MeshCore; retrying in %ss",
+                        reconnect_delay,
                     )
                     await asyncio.sleep(reconnect_delay)
                     continue
 
                 self._mc = mc
-                self.logger.info("✅ Connected to MeshCore device (%s → %s)", conn_type.upper(), target)
+                self.logger.info(
+                    "✅ Connected to MeshCore device (%s → %s)",
+                    conn_type.upper(),
+                    target,
+                )
 
                 mc.subscribe(EventType.CONTACTS, self._on_contacts)
                 mc.subscribe(EventType.NEW_CONTACT, self._on_new_contact)
                 mc.subscribe(EventType.ADVERTISEMENT, self._on_advertisement)
-                mc.subscribe(EventType.CHANNEL_MSG_RECV, self._on_channel_msg)
+                mc.subscribe(
+                    EventType.CHANNEL_MSG_RECV,
+                    lambda e: self._on_channel_msg(e.payload),
+                )
                 mc.subscribe(EventType.CONTACT_MSG_RECV, self._on_contact_msg)
-                mc.subscribe(EventType.CHANNEL_INFO, self._on_channel_info)
+                mc.subscribe(
+                    EventType.CHANNEL_INFO, lambda e: self._on_channel_info(e.payload)
+                )
 
                 # Subscribe to RAW_DATA to log undecodable packets (RTfMC-style)
                 mc.subscribe(EventType.RAW_DATA, self._on_raw_data)
@@ -663,38 +691,48 @@ class Plugin(BasePlugin):
                 await mc.ensure_contacts()
 
                 # Proactively scan all slots like the standalone slot listing script.
-                class _EventLike:
-                    def __init__(self, payload):
-                        self.payload = payload
-                self.logger.info("Proactively scanning all MeshCore slots for channel info (non-event driven)")
+                self.logger.info(
+                    "Proactively scanning all MeshCore slots for channel info (non-event driven)"
+                )
                 channels_found = 0
                 for idx in range(self._MAX_CHANNEL_SLOTS):
                     try:
                         info = await mc.commands.get_channel(idx)
-                        if info and hasattr(info, "payload") and info.payload.get('channel_name'):
+                        if (
+                            info
+                            and hasattr(info, "payload")
+                            and info.payload.get("channel_name")
+                        ):
                             channels_found += 1
-                            payload = info.payload
-                            name = payload.get('channel_name', '')
-                            secret = payload.get('channel_secret', b"")
-                            key_hex = secret.hex() if isinstance(secret, (bytes, bytearray)) else str(secret)
-                            channel_id = compute_channel_id(name, key_hex)
-                            await self._on_channel_info(_EventLike(payload))
+                            await self._on_channel_info(info.payload)
                     except Exception:
                         continue
-                self.logger.info("Channel scan complete: found %d channel(s)", channels_found)
-                self.logger.debug("MeshCore channels discovered: %s", [
-                    {"name": c["channel_name"], "idx": c.get("channel_idx"), "id": c["channel_id"][:8]}
-                    for c in self._channels_by_name.values()
-                ])
+                self.logger.info(
+                    "Channel scan complete: found %d channel(s)", channels_found
+                )
+                self.logger.debug(
+                    "MeshCore channels discovered: %s",
+                    [
+                        {
+                            "name": c["channel_name"],
+                            "idx": c.get("channel_idx"),
+                            "id": c["channel_id"][:8],
+                        }
+                        for c in self._channels_by_name.values()
+                    ],
+                )
 
                 for mapping in self._channel_mappings():
                     name = mapping["channel_name"]
-                    if "channel_index" not in mapping and name not in self._channels_by_name:
+                    if (
+                        "channel_index" not in mapping
+                        and name not in self._channels_by_name
+                    ):
                         self.logger.warning(
                             "Channel '%s' from config not found on MeshCore node. "
                             "Consider adding 'meshcore_channel_index' to your channel mapping "
                             "or ensure the node has been rebooted.",
-                            name
+                            name,
                         )
 
                 # Drain all messages already queued in the node before going live.
@@ -706,7 +744,10 @@ class Plugin(BasePlugin):
                 drained = 0
                 while not self._stop_event.is_set():
                     result = await mc.commands.get_msg()
-                    if result is None or result.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
+                    if result is None or result.type in (
+                        EventType.NO_MORE_MSGS,
+                        EventType.ERROR,
+                    ):
                         break
                     drained += 1
                 self.logger.info("Drained %d pending message(s) from node", drained)
@@ -715,7 +756,10 @@ class Plugin(BasePlugin):
                 async def _on_messages_waiting(_event: Any) -> None:
                     while not self._stop_event.is_set():
                         res = await mc.commands.get_msg()
-                        if res is None or res.type in (EventType.NO_MORE_MSGS, EventType.ERROR):
+                        if res is None or res.type in (
+                            EventType.NO_MORE_MSGS,
+                            EventType.ERROR,
+                        ):
                             break
 
                 mc.subscribe(EventType.MESSAGES_WAITING, _on_messages_waiting)
@@ -726,7 +770,10 @@ class Plugin(BasePlugin):
                 cleanup_counter = 0
                 while not self._stop_event.is_set():
                     if not mc.is_connected:
-                        self.logger.warning("❌ MeshCore device disconnected; will reconnect in %ss", reconnect_delay)
+                        self.logger.warning(
+                            "❌ MeshCore device disconnected; will reconnect in %ss",
+                            reconnect_delay,
+                        )
                         break
                     await asyncio.sleep(5)
                     cleanup_counter += 1
@@ -741,11 +788,17 @@ class Plugin(BasePlugin):
             except asyncio.TimeoutError:
                 self.logger.error(
                     "❌ MeshCore connection timed out after %ss — retrying in %ss",
-                    connect_timeout, reconnect_delay,
+                    connect_timeout,
+                    reconnect_delay,
                 )
                 await asyncio.sleep(reconnect_delay)
             except Exception as exc:
-                self.logger.error("❌ MeshCore connection error: %s — retrying in %ss", exc, reconnect_delay, exc_info=True)
+                self.logger.error(
+                    "❌ MeshCore connection error: %s — retrying in %ss",
+                    exc,
+                    reconnect_delay,
+                    exc_info=True,
+                )
                 await asyncio.sleep(reconnect_delay)
             finally:
                 if mc is not None:
@@ -804,7 +857,9 @@ class Plugin(BasePlugin):
             self._upsert_contacts([contact])
             name = contact.get("adv_name") or "?"
             self.logger.info(
-                "🆕 New MeshCore contact: %s  (key: %s…)", name, contact["public_key"][:8]
+                "🆕 New MeshCore contact: %s  (key: %s…)",
+                name,
+                contact["public_key"][:8],
             )
 
     async def _on_advertisement(self, event: Any) -> None:
@@ -817,7 +872,9 @@ class Plugin(BasePlugin):
                 try:
                     await mc.ensure_contacts(follow=True)
                 except Exception as exc:
-                    self.logger.debug("ensure_contacts after advertisement failed: %s", exc)
+                    self.logger.debug(
+                        "ensure_contacts after advertisement failed: %s", exc
+                    )
 
     async def _on_raw_data(self, event: Any) -> None:
         """
@@ -826,13 +883,14 @@ class Plugin(BasePlugin):
 
         This brings RTfMC-style real-time decryption of channel (group) RAW packets to Matrix.
         """
-        raw_bytes = event.payload if isinstance(event.payload, (bytes, bytearray)) else None
+        raw_bytes = (
+            event.payload if isinstance(event.payload, (bytes, bytearray)) else None
+        )
         if not raw_bytes:
             self.logger.debug("RAW_DATA event payload not bytes—ignoring")
             return
         decrypted = None
         chan_name = None
-        chan_info = None
         for name, chan in self._channels_by_name.items():
             key_hex = chan.get("channel_key")
             if not key_hex or len(key_hex) != 32 and len(key_hex) != 64:
@@ -846,14 +904,19 @@ class Plugin(BasePlugin):
             if result:
                 decrypted = result
                 chan_name = name
-                chan_info = chan
                 break
         if not decrypted or not chan_name:
-            self.logger.debug("RAW_DATA could not be decrypted with any channel key (payload_len=%d)", len(raw_bytes))
+            self.logger.debug(
+                "RAW_DATA could not be decrypted with any channel key (payload_len=%d)",
+                len(raw_bytes),
+            )
             return
         matrix_room = self._get_matrix_room_for_channel_name(chan_name)
         if not matrix_room:
-            self.logger.debug("RAW_DATA decrypted but channel '%s' is unmapped to Matrix; message ignored", chan_name)
+            self.logger.debug(
+                "RAW_DATA decrypted but channel '%s' is unmapped to Matrix; message ignored",
+                chan_name,
+            )
             return
         # Compose relay message like _on_channel_msg
         channel_info = {"type": "named", "channel_name": chan_name}
@@ -865,17 +928,21 @@ class Plugin(BasePlugin):
         msg = prefix + body
         if self._is_duplicate_meshcore_message(chan_name, sender, decrypted.message):
             self.logger.debug(
-                "MeshCore RAW_DATA duplicate for [%s] from [%s], ignored: %s", chan_name, sender, body[:77] + ('…' if len(body) > 80 else '')
+                "MeshCore RAW_DATA duplicate for [%s] from [%s], ignored: %s",
+                chan_name,
+                sender,
+                body[:77] + ("…" if len(body) > 80 else ""),
             )
             return
-        self.logger.info("MeshCore RAW→Matrix [%s]: %s", chan_name, msg[:77] + ('…' if len(msg) > 80 else ''))
+        self.logger.info(
+            "MeshCore RAW→Matrix [%s]: %s",
+            chan_name,
+            msg[:77] + ("…" if len(msg) > 80 else ""),
+        )
         await self.send_matrix_message(matrix_room, msg)
 
-    # ^^^^ This handler was added to provide RTfMC-grade packet decoding for RAW_DATA
-
-    async def _on_channel_info(self, event: Any) -> None:
+    async def _on_channel_info(self, payload: dict) -> None:
         """Handle CHANNEL_INFO events to auto-discover channel names and keys."""
-        payload = event.payload
         name = payload.get("channel_name", "")
         secret = payload.get("channel_secret", b"")
         idx = payload.get("channel_idx")
@@ -895,7 +962,9 @@ class Plugin(BasePlugin):
 
         # Avoid duplicate mapping: use setdefault for atomic insert.
         # If the name or idx already exists, skip adding a duplicate entry.
-        if name in self._channels_by_name or (idx is not None and idx in self._channels_by_idx):
+        if name in self._channels_by_name or (
+            idx is not None and idx in self._channels_by_idx
+        ):
             return
         self._channels_by_name[name] = entry
         if idx is not None:
@@ -904,9 +973,20 @@ class Plugin(BasePlugin):
 
         # Robust and unique logging for channel discovery:
         if not key_hex:
-            self.logger.info("Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)", name, idx, channel_id[:8])
+            self.logger.info(
+                "Discovered PUBLIC MeshCore channel: %s (idx=%s, id=%s...)",
+                name,
+                idx,
+                channel_id[:8],
+            )
         else:
-            self.logger.info("Discovered MeshCore channel: %s (idx=%s, id=%s..., key=%s)", name, idx, channel_id[:8], key_hex)
+            self.logger.info(
+                "Discovered MeshCore channel: %s (idx=%s, id=%s..., key=%s)",
+                name,
+                idx,
+                channel_id[:8],
+                key_hex,
+            )
 
         # Replay and clear any buffered messages for this slot now that mapping is known
         if idx is not None:
@@ -914,12 +994,14 @@ class Plugin(BasePlugin):
             if pending:
                 self.logger.info(
                     "Replaying %d previously buffered MeshCore message(s) for slot idx=%d now that mapping is available.",
-                    len(pending), idx)
+                    len(pending),
+                    idx,
+                )
                 for ts, msg in pending:
-                    await self._on_channel_msg(type('E', (), {'payload': msg})())
+                    await self._on_channel_msg(msg)
 
-    async def _on_channel_msg(self, event: Any) -> None:
-        msg = event.payload
+    async def _on_channel_msg(self, payload: dict) -> None:
+        msg = payload
         channel_idx: int = msg.get("channel_idx", -1)
         text: str = (msg.get("text") or "").strip()
 
@@ -938,7 +1020,9 @@ class Plugin(BasePlugin):
             # Check if this name is in our config
             if self._get_matrix_room_for_channel_name(potential_name):
                 channel_name = potential_name
-                self.logger.debug("Inferred channel name from message: %s", channel_name)
+                self.logger.debug(
+                    "Inferred channel name from message: %s", channel_name
+                )
 
         if not channel_name:
             # Buffer message if mapping for slot index (channel_idx) is not yet known
@@ -954,7 +1038,9 @@ class Plugin(BasePlugin):
 
         matrix_room = self._get_matrix_room_for_channel_name(channel_name)
         if not matrix_room:
-            self.logger.debug("Channel %s message dropped (no Matrix room mapped)", channel_name)
+            self.logger.debug(
+                "Channel %s message dropped (no Matrix room mapped)", channel_name
+            )
             return
 
         # Deduplication logic: sender extraction
@@ -963,16 +1049,21 @@ class Plugin(BasePlugin):
             sender = text.split(": ", 1)[0].strip()
             # If sender equals channel name, treat as no sender
             if sender == channel_name:
-                sender = ''
+                sender = ""
         else:
-            sender = ''
+            sender = ""
         plain_body = text
         if sender:
-            plain_body = text[len(sender) + 2:] if text.startswith(sender + ': ') else text
+            plain_body = (
+                text[len(sender) + 2 :] if text.startswith(sender + ": ") else text
+            )
 
         if self._is_duplicate_meshcore_message(channel_name, sender, plain_body):
             self.logger.debug(
-                "MeshCore CHANNEL_MSG_RECV duplicate for [%s] from [%s], ignored: %s", channel_name, sender, plain_body[:77] + ('…' if len(plain_body) > 80 else '')
+                "MeshCore CHANNEL_MSG_RECV duplicate for [%s] from [%s], ignored: %s",
+                channel_name,
+                sender,
+                plain_body[:77] + ("…" if len(plain_body) > 80 else ""),
             )
             return
 
@@ -980,7 +1071,11 @@ class Plugin(BasePlugin):
         prefix = self._fmt_channel_prefix(channel_info)
         full_msg = prefix + text
 
-        self.logger.info("MeshCore→Matrix [%s]: %s", channel_name, text[:77] + ('…' if len(text) > 80 else ''))
+        self.logger.info(
+            "MeshCore→Matrix [%s]: %s",
+            channel_name,
+            text[:77] + ("…" if len(text) > 80 else ""),
+        )
         await self.send_matrix_message(matrix_room, full_msg)
 
     async def _on_contact_msg(self, event: Any) -> None:
@@ -994,7 +1089,8 @@ class Plugin(BasePlugin):
         dm_room = self._dm_room()
         if not dm_room:
             self.logger.debug(
-                "DM from %s dropped (no direct_message_room configured)", pubkey_prefix[:8]
+                "DM from %s dropped (no direct_message_room configured)",
+                pubkey_prefix[:8],
             )
             return
 
@@ -1003,7 +1099,10 @@ class Plugin(BasePlugin):
         full_msg = prefix + text
 
         self.logger.info(
-            "MeshCore→Matrix [DM] %s: %s", sender_name or pubkey_prefix[:8], text[:77] + ('…' if len(text) > 80 else ''))
+            "MeshCore→Matrix [DM] %s: %s",
+            sender_name or pubkey_prefix[:8],
+            text[:77] + ("…" if len(text) > 80 else ""),
+        )
         await self.send_matrix_message(dm_room, full_msg)
 
     async def _setup_matrix_callback(self) -> None:
@@ -1027,12 +1126,15 @@ class Plugin(BasePlugin):
                     return
                 await asyncio.sleep(1)
                 from mmrelay.matrix_utils import matrix_client as _mc_ref2
+
                 mc_client = _mc_ref2
                 if mc_client is not None:
                     break
 
         if mc_client is None:
-            self.logger.error("Matrix client never became available; Matrix→MeshCore relay disabled")
+            self.logger.error(
+                "Matrix client never became available; Matrix→MeshCore relay disabled"
+            )
             return
 
         mc_client.add_event_callback(self._on_matrix_room_message, RoomMessageText)
@@ -1040,7 +1142,9 @@ class Plugin(BasePlugin):
         self.logger.info("Matrix room message callback registered")
 
         if join_matrix_room is None:
-            self.logger.warning("join_matrix_room not available; rooms may not be joined")
+            self.logger.warning(
+                "join_matrix_room not available; rooms may not be joined"
+            )
             return
 
         for mapping in self._channel_mappings():
@@ -1050,7 +1154,9 @@ class Plugin(BasePlugin):
                     await join_matrix_room(mc_client, room_id)
                     self.logger.debug("Joined Matrix room %s", room_id)
                 except Exception as exc:
-                    self.logger.warning("Could not join Matrix room %s: %s", room_id, exc)
+                    self.logger.warning(
+                        "Could not join Matrix room %s: %s", room_id, exc
+                    )
 
     async def _on_matrix_room_message(self, room: Any, event: Any) -> None:
         """Relay a Matrix message to the corresponding MeshCore channel.
@@ -1060,29 +1166,33 @@ class Plugin(BasePlugin):
         """
         if RoomMessageText is None:
             return
-        if bot_user_id is None:
+        if self._bot_user_id is None:
             try:
                 from mmrelay.matrix_utils import bot_user_id as _uid
-                if _uid is not None:
-                    globals()['bot_user_id'] = _uid
+
+                self._bot_user_id = _uid
             except Exception:
                 pass
-        if bot_start_time is None:
+        if self._bot_start_time is None:
             try:
-                from mmrelay.matrix_utils import bot_start_time as _time
-                if _time is not None:
-                    globals()['bot_start_time'] = _time
+                from mmrelay.matrix_utils import bot_start_time as _bst
+
+                self._bot_start_time = _bst
             except Exception:
                 pass
 
         if not isinstance(event, RoomMessageText):
             self.logger.debug("Ignored non-text event from room %s", room.room_id)
             return
-        if event.sender == bot_user_id:
-            self.logger.debug("Ignored message sent by the bot itself in room %s", room.room_id)
+        if event.sender == self._bot_user_id:
+            self.logger.debug(
+                "Ignored message sent by the bot itself in room %s", room.room_id
+            )
             return
-        if event.server_timestamp < bot_start_time:
-            self.logger.debug("Ignored backlog message (before bot start) in room %s", room.room_id)
+        if event.server_timestamp < self._bot_start_time:
+            self.logger.debug(
+                "Ignored backlog message (before bot start) in room %s", room.room_id
+            )
             return
 
         channel_info = self._get_channel_info_for_room(room.room_id)
@@ -1104,13 +1214,19 @@ class Plugin(BasePlugin):
         if reply_to:
             body = f"@[{reply_to}] {body}"
         body = sanitize_text(body)
-        self.logger.debug("Preparing MeshCore relay: prefix=%r body=%r", self._fmt_matrix_prefix(display_name), body)
+        self.logger.debug(
+            "Preparing MeshCore relay: prefix=%r body=%r",
+            self._fmt_matrix_prefix(display_name),
+            body,
+        )
         outgoing = sanitize_text(self._fmt_matrix_prefix(display_name) + body)
         truncated = len(outgoing.encode("utf-8")) > _MAX_MSG_LEN
         if not outgoing.strip():
             self.logger.warning(
                 "Message from %s in room %s sanitized to empty string; not relayed to MeshCore.",
-                event.sender, room.room_id)
+                event.sender,
+                room.room_id,
+            )
             return
 
         mc = self._mc
@@ -1134,9 +1250,14 @@ class Plugin(BasePlugin):
                 outgoing,
             )
             # Only named channels with PSK supported
-            result = await self._send_channel_message_with_overrides(mc, channel_info, outgoing, display_name)
+            result = await self._send_channel_message_with_overrides(
+                mc, channel_info, outgoing, display_name
+            )
             if result is not None and getattr(result, "type", None) != EventType.ERROR:
-                self.logger.info("Message relayed to MeshCore channel %s", channel_info.get("channel_name"))
+                self.logger.info(
+                    "Message relayed to MeshCore channel %s",
+                    channel_info.get("channel_name"),
+                )
 
         except Exception as exc:
             self.logger.error(
@@ -1160,7 +1281,10 @@ class Plugin(BasePlugin):
                 if now - ts > self._MAX_PENDING_MSG_TIMEOUT:
                     self.logger.warning(
                         "Slot idx=%d message dropped after %0.1fs pending (mapping/channel_info never received): %r",
-                        idx, now - ts, msg)
+                        idx,
+                        now - ts,
+                        msg,
+                    )
                 else:
                     still_valid.append((ts, msg))
             if still_valid:
@@ -1173,13 +1297,19 @@ class Plugin(BasePlugin):
     def _cleanup_last_sent_cache(self) -> None:
         """Remove stale entries from the deduplication cache."""
         now = time.time()
-        stale = [k for k, v in self._last_sent_for_channel.items() if now - v > self._DEDUP_STALE_SECS]
+        stale = [
+            k
+            for k, v in self._last_sent_for_channel.items()
+            if now - v > self._DEDUP_STALE_SECS
+        ]
         for k in stale:
             del self._last_sent_for_channel[k]
 
     # ── Matrix → MeshCore ─────────────────────────────────────────────────────
 
-    async def _send_channel_message_with_overrides(self, mc, channel_info, outgoing, display_name):
+    async def _send_channel_message_with_overrides(
+        self, mc, channel_info, outgoing, display_name
+    ):
         """
         Robust send to MeshCore channel, using correct slot index (channel_index).
         1. Get the channel slot index from channel_info or autodiscover if absent.
@@ -1193,14 +1323,17 @@ class Plugin(BasePlugin):
             display_name: Sender display name for logging.
         """
         raw_name = channel_info.get("channel_name", "?")
-        canonical_name = raw_name.lstrip('#').strip() if raw_name else raw_name
+        canonical_name = raw_name.lstrip("#").strip() if raw_name else raw_name
         channel_index = channel_info.get("channel_index")
         if channel_index is None:
-            channel_id = compute_channel_id(canonical_name, channel_info.get("channel_key") or "")
+            channel_id = compute_channel_id(
+                canonical_name, channel_info.get("channel_key") or ""
+            )
             channel_key = channel_info.get("channel_key")
             for idx, chan in self._channels_by_idx.items():
                 if chan.get("channel_id") == channel_id or (
-                    chan.get("channel_name") == canonical_name and chan.get("channel_key") == channel_key
+                    chan.get("channel_name") == canonical_name
+                    and chan.get("channel_key") == channel_key
                 ):
                     channel_index = idx
                     break
@@ -1214,9 +1347,14 @@ class Plugin(BasePlugin):
         try:
             self.logger.debug(
                 "Sending Matrix→MeshCore (slot %s, channel: %s, user: %s): %r",
-                channel_index, canonical_name, display_name, outgoing[:80],
+                channel_index,
+                canonical_name,
+                display_name,
+                outgoing[:80],
             )
-            result = await send_channel_message_with_timestamp(mc, channel_index, outgoing)
+            result = await send_channel_message_with_timestamp(
+                mc, channel_index, outgoing
+            )
         except Exception as exc:
             # Always log on error
             self.logger.error(
@@ -1231,20 +1369,25 @@ class Plugin(BasePlugin):
         if result is None:
             self.logger.warning(
                 "Message could not be sent to MeshCore channel %s (slot %s, user: %s, msg: %r): no response",
-                canonical_name, channel_index, display_name, outgoing[:80],
+                canonical_name,
+                channel_index,
+                display_name,
+                outgoing[:80],
             )
         elif getattr(result, "type", None) == EventType.ERROR:
-            self.logger.error("MeshCore rejected channel message: %s", getattr(result, "payload", None))
+            self.logger.error(
+                "MeshCore rejected channel message: %s",
+                getattr(result, "payload", None),
+            )
         else:
             self.logger.info(
                 "Matrix→MeshCore [%s|slot %s] %s: %s",
                 canonical_name,
                 channel_index,
                 display_name,
-                outgoing[:77] + ('…' if len(outgoing) > 80 else ''),
+                outgoing[:77] + ("…" if len(outgoing) > 80 else ""),
             )
         return result
-
 
     async def handle_meshtastic_message(
         self,
@@ -1323,14 +1466,17 @@ class Plugin(BasePlugin):
         text = original_body.strip()
         idx = text.find("]: ")
         if idx != -1:
-            text = text[idx + 3:]
+            text = text[idx + 3 :]
 
         if ": " not in text:
             return None
 
         candidate = text.split(": ", 1)[0].strip()
-        if candidate and len(candidate) <= self._MAX_SENDER_NAME_LEN and not candidate.startswith(("@", "!", "[")):
+        if (
+            candidate
+            and len(candidate) <= self._MAX_SENDER_NAME_LEN
+            and not candidate.startswith(("@", "!", "["))
+        ):
             return candidate
 
         return None
-
